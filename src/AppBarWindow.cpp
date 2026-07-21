@@ -897,7 +897,7 @@ RECT AppBarWindow::ClampPanelGroupRect(RECT rect) const {
             ToWidgetRect(rect),
             GetBubbleSizeForState(),
             ScaleForDpi(hwnd_, kPanelBubbleGap)),
-        ToWidgetRect(GetCurrentMonitorWorkRect()));
+        ToWidgetRect(GetDesktopClientRect()));
     return ToWin32Rect(group.panel);
 }
 
@@ -917,7 +917,7 @@ codex_widget::WidgetGroupGeometry AppBarWindow::GetCurrentGroupGeometry() const 
             ToWidgetRect(savedRect_),
             GetBubbleSizeForState(),
             ScaleForDpi(hwnd_, kPanelBubbleGap)),
-        ToWidgetRect(GetCurrentMonitorWorkRect()));
+        ToWidgetRect(GetDesktopClientRect()));
 }
 
 RECT AppBarWindow::GetExpandedWindowRect(const RECT& panelRect) const {
@@ -926,7 +926,7 @@ RECT AppBarWindow::GetExpandedWindowRect(const RECT& panelRect) const {
             ToWidgetRect(panelRect),
             GetBubbleSizeForState(),
             ScaleForDpi(hwnd_, kPanelBubbleGap)),
-        ToWidgetRect(GetCurrentMonitorWorkRect()));
+        ToWidgetRect(GetDesktopClientRect()));
     return ToWin32Rect(group.window);
 }
 
@@ -936,7 +936,7 @@ RECT AppBarWindow::GetBubbleWindowRect(const RECT& expandedRect) const {
             ToWidgetRect(expandedRect),
             GetBubbleSizeForState(),
             ScaleForDpi(hwnd_, kPanelBubbleGap)),
-        ToWidgetRect(GetCurrentMonitorWorkRect()));
+        ToWidgetRect(GetDesktopClientRect()));
     return ToWin32Rect(group.bubble);
 }
 
@@ -1008,7 +1008,7 @@ void AppBarWindow::UpdateWindowBounds(bool useSavedPosition) {
             ToWidgetRect(expandedRect),
             GetBubbleSizeForState(),
             ScaleForDpi(hwnd_, kPanelBubbleGap)),
-        ToWidgetRect(GetCurrentMonitorWorkRect()));
+        ToWidgetRect(GetDesktopClientRect()));
     savedRect_ = ToWin32Rect(group.panel);
     hasSavedRect_ = true;
     RECT windowRect = ToWin32Rect(group.window);
@@ -1760,62 +1760,15 @@ void AppBarWindow::DrawAssetBitmap(
 }
 
 void AppBarWindow::EnableNativeGlassBackdrop() {
-    if (hwnd_ == nullptr) {
-        return;
+    // The widget is published as a per-pixel-alpha layered surface. Applying
+    // DWM acrylic/blur to that HWND also paints the transparent pixels in its
+    // rectangular bounds, which creates a visible frame around the bubble,
+    // panel, and taskbar presentation. The actual glass material is already
+    // rendered by Direct2D inside the non-transparent shapes, so the native
+    // backdrop must stay disabled for every presentation mode.
+    if (nativeGlassEnabled_) {
+        DisableNativeGlassBackdrop();
     }
-
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    const auto setWindowCompositionAttribute = user32 == nullptr
-        ? nullptr
-        : reinterpret_cast<SetWindowCompositionAttributeFunction>(
-            GetProcAddress(user32, "SetWindowCompositionAttribute"));
-    if (setWindowCompositionAttribute == nullptr) {
-        nativeGlassEnabled_ = false;
-        return;
-    }
-
-    const int transparency = codex_widget::ClampTransparencyPercent(glassTransparencyPercent_);
-    const BYTE alpha = static_cast<BYTE>(
-        std::clamp(0x42 + (80 - transparency) / 2, 0, 0xFF));
-    const COLORREF tint = lightTheme_ ? RGB(224, 220, 255) : RGB(45, 55, 94);
-    const DWORD gradientColor =
-        (static_cast<DWORD>(alpha) << 24)
-        | (static_cast<DWORD>(GetBValue(tint)) << 16)
-        | (static_cast<DWORD>(GetGValue(tint)) << 8)
-        | static_cast<DWORD>(GetRValue(tint));
-    ACCENT_POLICY policy = {
-        ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        2,
-        gradientColor,
-        0,
-    };
-    WINDOWCOMPOSITIONATTRIBDATA data = {
-        WCA_ACCENT_POLICY,
-        &policy,
-        sizeof(policy),
-    };
-    const bool accentEnabled = setWindowCompositionAttribute(&data) != FALSE;
-
-    DWM_BLURBEHIND blurBehind = {};
-    blurBehind.dwFlags = DWM_BB_ENABLE;
-    blurBehind.fEnable = TRUE;
-    const bool blurBehindEnabled = SUCCEEDED(DwmEnableBlurBehindWindow(hwnd_, &blurBehind));
-    nativeGlassEnabled_ = accentEnabled || blurBehindEnabled;
-
-    const BOOL darkMode = lightTheme_ ? FALSE : TRUE;
-    constexpr DWORD kDwmUseImmersiveDarkMode = 20;
-    constexpr DWORD kDwmWindowCornerPreference = 33;
-    DWORD cornerPreference = 2;
-    DwmSetWindowAttribute(
-        hwnd_,
-        kDwmUseImmersiveDarkMode,
-        &darkMode,
-        sizeof(darkMode));
-    DwmSetWindowAttribute(
-        hwnd_,
-        kDwmWindowCornerPreference,
-        &cornerPreference,
-        sizeof(cornerPreference));
 }
 
 void AppBarWindow::DisableNativeGlassBackdrop() {
