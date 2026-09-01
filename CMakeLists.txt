@@ -3,6 +3,8 @@
 project(CodexUsageMonitor VERSION 0.1.0 LANGUAGES CXX)
 
 option(CODEX_USAGE_MONITOR_BUILD_TESTS "Build native CodexUsageMonitor tests" OFF)
+option(CODEX_USAGE_MONITOR_UI_TEST_WINDOW "Expose the widget as an app window for UI automation" OFF)
+set(CODEX_USAGE_MONITOR_UI_TEST_SCENARIO "0" CACHE STRING "UI test scenario: 0 quota, 1 activity, 2 simple, 3 taskbar, 4 activity zh")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +51,13 @@ target_compile_definitions(CodexUsageMonitor PRIVATE
     APP_VERSION_W=L\"${APP_VERSION_TEXT}\"
 )
 
+if(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
+    target_compile_definitions(CodexUsageMonitor PRIVATE
+        CODEX_USAGE_MONITOR_UI_TEST_WINDOW=1
+        CODEX_USAGE_MONITOR_UI_TEST_SCENARIO=${CODEX_USAGE_MONITOR_UI_TEST_SCENARIO}
+    )
+endif()
+
 target_compile_options(CodexUsageMonitor PRIVATE /utf-8)
 
 target_link_libraries(CodexUsageMonitor PRIVATE
@@ -83,7 +92,8 @@ if(CODEX_USAGE_MONITOR_BUILD_TESTS)
     )
     target_include_directories(CodexUsageMonitorTests PRIVATE src)
     target_compile_definitions(CodexUsageMonitorTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_compile_options(CodexUsageMonitorTests PRIVATE /utf-8)
+    # Keep fixture assertions active in Release so CTest verifies behavior in both configurations.
+    target_compile_options(CodexUsageMonitorTests PRIVATE /utf-8 /UNDEBUG)
     target_link_libraries(CodexUsageMonitorTests PRIVATE
         crypt32
         shlwapi

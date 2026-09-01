@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -186,6 +187,9 @@ void VerifyLocalUsageIncrementalIndex() {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    _set_error_mode(_OUT_TO_STDERR);
+#endif
     if (argc == 4 && std::string(argv[1]) == "--scan-local") {
         const codex_usage::LocalUsagePaths paths{
             std::filesystem::path(argv[2]),

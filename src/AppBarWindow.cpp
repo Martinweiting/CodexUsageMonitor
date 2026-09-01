@@ -339,8 +339,13 @@ bool AppBarWindow::Create() {
     RegisterWindowClass();
     RegisterPrivateFonts();
     LoadSettings();
+#if defined(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
+    constexpr DWORD extendedWindowStyle = WS_EX_LAYERED | WS_EX_APPWINDOW;
+#else
+    constexpr DWORD extendedWindowStyle = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+#endif
     hwnd_ = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        extendedWindowStyle,
         kWindowClassName,
         LocalizeText(L"Codex Usage Widget", L"Codex 用量小工具"),
         WS_POPUP | WS_VISIBLE,
@@ -373,6 +378,36 @@ bool AppBarWindow::Create() {
     SetTimer(hwnd_, kCountdownTimerId, 1000, nullptr);
     SetTimer(hwnd_, kHoverPollTimerId, kHoverPollMilliseconds, nullptr);
     SetTimer(hwnd_, kLocalUsageTimerId, kLocalUsageRefreshMilliseconds, nullptr);
+#if defined(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
+#if CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 1
+    SetDisplayMode(false, false);
+    fullPage_ = codex_widget::FullPage::Activity;
+    SetLanguage(Language::English);
+    SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
+    SetWindowTextW(hwnd_, L"Codex Usage Widget [Activity EN]");
+#elif CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 2
+    SetDisplayMode(true, false);
+    SetLanguage(Language::English);
+    SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
+    SetWindowTextW(hwnd_, L"Codex Usage Widget [Simple EN]");
+#elif CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 3
+    SetDisplayMode(false, true);
+    SetLanguage(Language::English);
+    SetWindowTextW(hwnd_, L"Codex Usage Widget [Taskbar]");
+#elif CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 4
+    SetDisplayMode(false, false);
+    fullPage_ = codex_widget::FullPage::Activity;
+    SetLanguage(Language::Chinese);
+    SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
+    SetWindowTextW(hwnd_, L"Codex 用量小工具 [活動 ZH]");
+#else
+    SetDisplayMode(false, false);
+    fullPage_ = codex_widget::FullPage::Quota;
+    SetLanguage(Language::English);
+    SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
+    SetWindowTextW(hwnd_, L"Codex Usage Widget [Quota EN]");
+#endif
+#endif
     RestartRefreshTimer();
     RequestRefresh(true);
     RequestLocalUsageRefresh(true);
@@ -808,6 +843,12 @@ RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
         return BuildTaskbarDockRect();
     }
 
+#if defined(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
+    (void)desktopRect;
+    const int testWidth = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
+    const int testHeight = GetMinimumWidgetHeight(testWidth);
+    return MakeRect(100, 100, 100 + testWidth, 100 + testHeight);
+#else
     // Default / reset position: top-right of the current desktop work area.
     const int margin = ScaleForDpi(hwnd_, kDesktopMargin);
     const int width = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
@@ -822,6 +863,7 @@ RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
     }
     rect.bottom = rect.top + height;
     return rect;
+#endif
 }
 
 RECT AppBarWindow::BuildTaskbarDockRect() const {
@@ -1275,6 +1317,9 @@ void AppBarWindow::SaveSettings() const {
 }
 
 std::wstring AppBarWindow::GetSettingsPath() const {
+#if defined(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
+    return (std::filesystem::path(GetExecutablePath()).parent_path() / L"ui-test-settings.ini").wstring();
+#else
     PWSTR appDataPath = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath))) {
         const std::filesystem::path path = std::filesystem::path(appDataPath) / L"CodexUsageMonitor" / L"settings.ini";
@@ -1285,6 +1330,7 @@ std::wstring AppBarWindow::GetSettingsPath() const {
     wchar_t modulePath[MAX_PATH] = {};
     GetModuleFileNameW(instance_, modulePath, MAX_PATH);
     return (std::filesystem::path(modulePath).parent_path() / L"settings.ini").wstring();
+#endif
 }
 
 std::wstring AppBarWindow::GetExecutablePath() const {

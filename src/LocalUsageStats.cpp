@@ -955,12 +955,16 @@ std::wstring FormatCompactCount(std::uint64_t value) {
         scaled /= 1000.0L;
         ++suffix;
     }
-    std::wostringstream output;
-    if (scaled < 100.0L) {
-        output << std::fixed << std::setprecision(1) << static_cast<double>(scaled);
-    } else {
-        output << std::fixed << std::setprecision(0) << static_cast<double>(scaled);
+    int precision = scaled < 100.0L ? 1 : 0;
+    long double factor = precision == 1 ? 10.0L : 1.0L;
+    scaled = std::floor(scaled * factor + 0.5L) / factor;
+    if (scaled >= 1000.0L && suffix + 1 < std::size(suffixes)) {
+        scaled /= 1000.0L;
+        ++suffix;
+        precision = scaled < 100.0L ? 1 : 0;
     }
+    std::wostringstream output;
+    output << std::fixed << std::setprecision(precision) << static_cast<double>(scaled);
     std::wstring text = output.str();
     if (const size_t decimal = text.find(L'.'); decimal != std::wstring::npos
         && text.substr(decimal) == L".0") {
