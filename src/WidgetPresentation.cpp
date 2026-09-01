@@ -60,18 +60,18 @@ FullPage FullPageAfterTabClick(FullPage current, bool quotaClicked, bool activit
 }
 
 int ClampTransparencyPercent(int value) {
-    return std::clamp(value, 20, 80);
+    return std::clamp(value, 0, 80);
 }
 
 int TransparencyPercentForSlider(int x, int left, int right) {
     if (right <= left) {
-        return 20;
+        return 0;
     }
 
     const int clampedX = std::clamp(x, left, right);
     const int span = right - left;
     const int offset = clampedX - left;
-    return ClampTransparencyPercent(20 + (offset * 60 + span / 2) / span);
+    return ClampTransparencyPercent((offset * 80 + span / 2) / span);
 }
 
 WidgetRect BubbleGeometryForExpandedRect(const WidgetRect& expanded, int bubbleSize) {

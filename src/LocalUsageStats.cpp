@@ -973,4 +973,58 @@ std::wstring FormatCompactCount(std::uint64_t value) {
     return text + suffixes[suffix];
 }
 
+std::wstring FormatTraditionalChineseCount(std::uint64_t value) {
+    if (value < 10000) {
+        return std::to_wstring(value);
+    }
+
+    struct ChineseUnit {
+        std::uint64_t divisor;
+        const wchar_t* suffix;
+    };
+    static constexpr ChineseUnit units[] = {
+        { 10000ULL, L"萬" },
+        { 100000000ULL, L"億" },
+        { 1000000000000ULL, L"兆" },
+        { 10000000000000000ULL, L"京" },
+    };
+
+    size_t unitIndex = 0;
+    for (size_t index = 1; index < std::size(units); ++index) {
+        if (value >= units[index].divisor) {
+            unitIndex = index;
+        } else {
+            break;
+        }
+    }
+
+    auto roundScaled = [&](size_t index) {
+        const long double scaled = static_cast<long double>(value)
+            / static_cast<long double>(units[index].divisor);
+        const int precision = scaled < 100.0L ? 1 : 0;
+        const long double factor = precision == 1 ? 10.0L : 1.0L;
+        return std::floor(scaled * factor + 0.5L) / factor;
+    };
+
+    long double rounded = roundScaled(unitIndex);
+    while (rounded >= 10000.0L && unitIndex + 1 < std::size(units)) {
+        ++unitIndex;
+        rounded = roundScaled(unitIndex);
+    }
+
+    const int precision = rounded < 100.0L ? 1 : 0;
+    std::wostringstream output;
+    output << std::fixed << std::setprecision(precision) << static_cast<double>(rounded);
+    std::wstring text = output.str();
+    if (const size_t decimal = text.find(L'.'); decimal != std::wstring::npos) {
+        while (!text.empty() && text.back() == L'0') {
+            text.pop_back();
+        }
+        if (!text.empty() && text.back() == L'.') {
+            text.pop_back();
+        }
+    }
+    return text + L" " + units[unitIndex].suffix;
+}
+
 }  // namespace codex_usage

@@ -20,6 +20,7 @@ $forbidden = @(
     'resetCreditConfirmStep_',
     'CreateRedeemRequestId'
     '.detach()'
+    'constexpr DWORD extendedWindowStyle = WS_EX_LAYERED | WS_EX_TOOLWINDOW'
 )
 $found = @($forbidden | Where-Object { $content.Contains($_) })
 if ($found.Count -gt 0) {
@@ -31,10 +32,8 @@ $required = @(
     'assets\\icons\\undo.png',
     'assets\\fonts\\Iansui-Regular.ttf',
     'assets\\fonts\\Quantico-Regular.ttf',
-    'assets\\fonts\\StoryScript-Regular.ttf',
     'Iansui',
     'Quantico',
-    'Story Script',
     'Transparency',
     ([string]::Concat([char]0x900F, [char]0x660E, [char]0x5EA6)),
     'kTaskbarDefaultWidgetWidth = codex_widget::kTaskbarWidgetLogicalWidth',
@@ -65,21 +64,17 @@ $required = @(
     'request_stop()'
     'RequestLocalUsageRefresh'
     'FullPageAfterTabClick'
+    'CodexUsageMonitorOwner'
+    'WM_MOUSEACTIVATE'
+    'MA_ACTIVATE'
+    'fillInteractiveHitTarget'
+    'FormatTraditionalChineseCount'
     'Today tokens'
     ([string]::Concat([char]0x4ECA, [char]0x65E5, ' Token'))
 )
 $missing = @($required | Where-Object { -not $content.Contains($_) })
 if ($missing.Count -gt 0) {
     Write-Error ('Required visual asset/font symbols are missing: ' + ($missing -join ', '))
-    exit 1
-}
-$storyFont = Join-Path $PSScriptRoot '..\assets\fonts\StoryScript-Regular.ttf'
-if (-not (Test-Path -LiteralPath $storyFont)) {
-    Write-Error ('Story Script font asset is missing: ' + $storyFont)
-    exit 1
-}
-if ((Get-Item -LiteralPath $storyFont).Length -ne 121032) {
-    Write-Error ('Story Script font asset has an unexpected size: ' + (Get-Item -LiteralPath $storyFont).Length)
     exit 1
 }
 Write-Output 'Reset-consumption source contract passed'

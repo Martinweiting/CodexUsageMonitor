@@ -333,16 +333,40 @@ AppBarWindow::~AppBarWindow() {
     DiscardDeviceResources();
     DiscardLayeredSurface();
     UnregisterPrivateFonts();
+    if (ownerHwnd_ != nullptr) {
+        DestroyWindow(ownerHwnd_);
+        ownerHwnd_ = nullptr;
+    }
 }
 
 bool AppBarWindow::Create() {
     RegisterWindowClass();
     RegisterPrivateFonts();
     LoadSettings();
+    // Keep the interactive layered HWND out of the taskbar by owning it with a
+    // hidden tool window. Applying WS_EX_TOOLWINDOW directly to the interactive
+    // HWND made mouse activation/input unreliable on the deployed widget.
+    ownerHwnd_ = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        L"STATIC",
+        L"CodexUsageMonitorOwner",
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        nullptr,
+        nullptr,
+        instance_,
+        nullptr);
+    if (ownerHwnd_ == nullptr) {
+        return false;
+    }
+
 #if defined(CODEX_USAGE_MONITOR_UI_TEST_WINDOW)
     constexpr DWORD extendedWindowStyle = WS_EX_LAYERED | WS_EX_APPWINDOW;
 #else
-    constexpr DWORD extendedWindowStyle = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+    constexpr DWORD extendedWindowStyle = WS_EX_LAYERED;
 #endif
     hwnd_ = CreateWindowExW(
         extendedWindowStyle,
@@ -353,12 +377,14 @@ bool AppBarWindow::Create() {
         0,
         100,
         100,
-        nullptr,
+        ownerHwnd_,
         nullptr,
         instance_,
         this);
 
     if (hwnd_ == nullptr) {
+        DestroyWindow(ownerHwnd_);
+        ownerHwnd_ = nullptr;
         return false;
     }
 
@@ -400,6 +426,12 @@ bool AppBarWindow::Create() {
     SetLanguage(Language::Chinese);
     SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
     SetWindowTextW(hwnd_, L"Codex 用量小工具 [活動 ZH]");
+#elif CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 5
+    SetDisplayMode(false, false);
+    fullPage_ = codex_widget::FullPage::Quota;
+    SetLanguage(Language::English);
+    SetPresentationState(codex_widget::PresentationState::PinnedExpanded);
+    SetWindowTextW(hwnd_, L"Codex Usage Widget [Quota Secondary]");
 #else
     SetDisplayMode(false, false);
     fullPage_ = codex_widget::FullPage::Quota;
@@ -508,6 +540,11 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_NCHITTEST: {
             return HTCLIENT;
         }
+
+        case WM_MOUSEACTIVATE:
+            // Native controls need a normal activation path so the layered
+            // popup receives the complete mouse down/up sequence.
+            return MA_ACTIVATE;
 
         case WM_SETCURSOR: {
             POINT screenPoint = {};
@@ -847,7 +884,11 @@ RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
     (void)desktopRect;
     const int testWidth = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
     const int testHeight = GetMinimumWidgetHeight(testWidth);
+#if CODEX_USAGE_MONITOR_UI_TEST_SCENARIO == 5
+    return MakeRect(1920, -500, 1920 + testWidth, -500 + testHeight);
+#else
     return MakeRect(100, 100, 100 + testWidth, 100 + testHeight);
+#endif
 #else
     // Default / reset position: top-right of the current desktop work area.
     const int margin = ScaleForDpi(hwnd_, kDesktopMargin);
@@ -1355,7 +1396,6 @@ bool AppBarWindow::RegisterPrivateFonts() {
         L"assets\\fonts\\Quantico-Italic.ttf",
         L"assets\\fonts\\Quantico-Bold.ttf",
         L"assets\\fonts\\Quantico-BoldItalic.ttf",
-        L"assets\\fonts\\StoryScript-Regular.ttf",
     };
 
     bool registeredAny = false;
@@ -1533,7 +1573,7 @@ HRESULT AppBarWindow::EnsureTextFormats() {
 
     DiscardTextFormats();
 
-    const wchar_t* primaryFamily = language_ == Language::Chinese ? L"Iansui" : L"Story Script";
+    const wchar_t* primaryFamily = language_ == Language::Chinese ? L"Iansui" : L"Quantico";
     HRESULT hr = CreateTextFormat(
         static_cast<float>(ScaleForDpi(hwnd_, 12)),
         DWRITE_FONT_WEIGHT_NORMAL,
@@ -1594,7 +1634,7 @@ void AppBarWindow::ApplyFontRuns(IDWriteTextLayout* layout, const std::wstring& 
             continue;
         }
 
-        const wchar_t* family = currentIsCjk ? L"Iansui" : L"Story Script";
+        const wchar_t* family = currentIsCjk ? L"Iansui" : L"Quantico";
         layout->SetFontFamilyName(
             family,
             DWRITE_TEXT_RANGE{
@@ -2451,6 +2491,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     quotaTabRect_ = {};
     activityTabRect_ = {};
     const PaceInfo pace = BuildPaceInfo(snapshot_);
+    const auto formatActivityCount = [this](std::uint64_t value) {
+        return language_ == Language::Chinese
+            ? codex_usage::FormatTraditionalChineseCount(value)
+            : codex_usage::FormatCompactCount(value);
+    };
     const int padX = ScaleForDpi(hwnd_, kHorizontalPadding);
     const int padY = ScaleForDpi(hwnd_, kVerticalPadding);
     const int meterHeight = ScaleForDpi(hwnd_, 12);
@@ -2513,6 +2558,17 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     auto fillEllipse = [&](const D2D1_ELLIPSE& ellipse, COLORREF color, float alpha) {
         solidBrush_->SetColor(ToColorF(color, alpha));
         renderTarget_->FillEllipse(ellipse, solidBrush_.Get());
+    };
+
+    // UpdateLayeredWindow uses per-pixel alpha for native mouse hit testing.
+    // Give every logical control rectangle a visually imperceptible, non-zero
+    // alpha floor so its transparent padding remains reliably clickable.
+    auto fillInteractiveHitTarget = [&](const RECT& rect) {
+        if (rect.right <= rect.left || rect.bottom <= rect.top) {
+            return;
+        }
+        solidBrush_->SetColor(ToColorF(RGB(255, 255, 255), 0.012f));
+        renderTarget_->FillRectangle(ToRectF(rect), solidBrush_.Get());
     };
 
     auto drawLine = [&](D2D1_POINT_2F start, D2D1_POINT_2F end, COLORREF color, float width, float alpha) {
@@ -2759,6 +2815,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         closeButtonRect_ = {};
         refreshButtonRect_ = {};
         settingsSliderRect_ = {};
+        fillInteractiveHitTarget(clientRect);
 
         const int circleInset = ScaleForDpi(hwnd_, 2);
         const RECT circleRect = MakeRect(
@@ -2870,6 +2927,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         bubbleButtonRect_ = clientRect;
         closeButtonRect_ = {};
         refreshButtonRect_ = {};
+        fillInteractiveHitTarget(bubbleButtonRect_);
         const D2D1_ELLIPSE shadowEllipse = D2D1::Ellipse(
             D2D1::Point2F(
                 static_cast<float>(clientRect.left + RectWidth(clientRect) / 2 + ScaleForDpi(hwnd_, 2)),
@@ -2908,8 +2966,10 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         panelRect.right + ScaleForDpi(hwnd_, 3), panelRect.bottom + ScaleForDpi(hwnd_, 5)), shadow);
     drawGlassPanel(panelRect);
     if (usesFloatingBubble) {
+        fillInteractiveHitTarget(bubbleButtonRect_);
         drawCodexAsset(bubbleButtonRect_, presentationState_ == codex_widget::PresentationState::HoverExpanded ? 1.0f : 0.96f);
     }
+    fillInteractiveHitTarget(closeButtonRect_);
     drawCloseGlyph(closeButtonRect_);
 
     if (settingsOpen_) {
@@ -2928,12 +2988,13 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             sliderTop,
             panelRect.right - settingsPad,
             sliderTop + ScaleForDpi(hwnd_, 22));
+        fillInteractiveHitTarget(settingsSliderRect_);
         const int trackTop = sliderTop + ScaleForDpi(hwnd_, 7);
         RECT trackRect = MakeRect(settingsSliderRect_.left, trackTop,
             settingsSliderRect_.right, trackTop + ScaleForDpi(hwnd_, 8));
         fillRect(trackRect, trackColor);
-        const int valueRange = 60;
-        const int valueOffset = glassTransparencyPercent_ - 20;
+        const int valueRange = 80;
+        const int valueOffset = glassTransparencyPercent_;
         RECT valueRect = trackRect;
         valueRect.right = valueRect.left + (RectWidth(trackRect) * valueOffset / valueRange);
         if (valueRect.right > valueRect.left) {
@@ -3032,9 +3093,9 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         const std::wstring resetExpiry = BuildResetCreditsExpiryText();
         const std::wstring localSummary = localUsageSnapshot_.available
             ? (std::wstring(LocalizeText(L"Today ", L"今日 "))
-                + codex_usage::FormatCompactCount(localUsageSnapshot_.today.totalTokens)
+                + formatActivityCount(localUsageSnapshot_.today.totalTokens)
                 + LocalizeText(L" tokens · ", L" Token · ")
-                + codex_usage::FormatCompactCount(localUsageSnapshot_.todayTaskCount)
+                + formatActivityCount(localUsageSnapshot_.todayTaskCount)
                 + LocalizeText(L" tasks", L" 個任務"))
             : (localUsageInFlight_
                 ? std::wstring(LocalizeText(L"Building local statistics", L"正在建立本機統計"))
@@ -3136,6 +3197,8 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         const int tabWidth = (RectWidth(headerRect) - tabGap) / 2;
         quotaTabRect_ = MakeRect(headerRect.left, y, headerRect.left + tabWidth, y + tabHeight);
         activityTabRect_ = MakeRect(quotaTabRect_.right + tabGap, y, headerRect.right, y + tabHeight);
+        fillInteractiveHitTarget(quotaTabRect_);
+        fillInteractiveHitTarget(activityTabRect_);
         drawOpaqueRounded(
             quotaTabRect_,
             fullPage_ == codex_widget::FullPage::Quota ? cardBlue : cardNeutral,
@@ -3157,7 +3220,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         if (fullPage_ == codex_widget::FullPage::Activity) {
             const bool localAvailable = localUsageSnapshot_.available;
             const auto localValue = [&](std::uint64_t value) {
-                return localAvailable ? codex_usage::FormatCompactCount(value) : std::wstring(L"--");
+                return localAvailable ? formatActivityCount(value) : std::wstring(L"--");
             };
             const std::wstring metricTitles[] = {
                 LocalizeText(L"Today tokens", L"今日 Token"),
@@ -3202,7 +3265,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             }
             y += summaryHeight * 2 + summaryGap + cardGap;
 
-            const int breakdownHeight = ScaleForDpi(hwnd_, 92);
+            const bool compactChineseLayout = language_ == Language::Chinese;
+            // Chinese values use 萬／億／兆 and are wider than the English
+            // K/M/B abbreviations. Give them two rows across three columns so
+            // every today/local pair remains readable at the compact width.
+            const int breakdownHeight = ScaleForDpi(hwnd_, compactChineseLayout ? 112 : 92);
             const RECT breakdownCard = MakeRect(headerRect.left, y, headerRect.right, y + breakdownHeight);
             fillCard(breakdownCard, cardNeutral);
             drawOpaqueTextLine(
@@ -3233,23 +3300,51 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             };
             const int breakdownLeft = breakdownCard.left + ScaleForDpi(hwnd_, 10);
             const int breakdownWidth = RectWidth(breakdownCard) - ScaleForDpi(hwnd_, 20);
-            for (int index = 0; index < 5; ++index) {
-                const int left = breakdownLeft + breakdownWidth * index / 5;
-                const int right = breakdownLeft + breakdownWidth * (index + 1) / 5;
-                drawOpaqueTextLine(
-                    textFormatFoot_.Get(), breakdownTitles[index],
-                    MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 27), right,
-                        breakdownCard.top + ScaleForDpi(hwnd_, 46)),
-                    textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
-                const std::wstring value = localAvailable
-                    ? (codex_usage::FormatCompactCount(todayBreakdown[index]) + L" / "
-                        + codex_usage::FormatCompactCount(totalBreakdown[index]))
-                    : L"--";
-                drawOpaqueTextLine(
-                    textFormatFoot_.Get(), value,
-                    MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 47), right,
-                        breakdownCard.bottom - ScaleForDpi(hwnd_, 5)),
-                    textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
+            if (!compactChineseLayout) {
+                for (int index = 0; index < 5; ++index) {
+                    const int left = breakdownLeft + breakdownWidth * index / 5;
+                    const int right = breakdownLeft + breakdownWidth * (index + 1) / 5;
+                    drawOpaqueTextLine(
+                        textFormatFoot_.Get(), breakdownTitles[index],
+                        MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 27), right,
+                            breakdownCard.top + ScaleForDpi(hwnd_, 46)),
+                        textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+                    const std::wstring value = localAvailable
+                        ? (formatActivityCount(todayBreakdown[index]) + L" / "
+                            + formatActivityCount(totalBreakdown[index]))
+                        : L"--";
+                    drawOpaqueTextLine(
+                        textFormatFoot_.Get(), value,
+                        MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 47), right,
+                            breakdownCard.bottom - ScaleForDpi(hwnd_, 5)),
+                        textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
+            } else {
+                constexpr int kBreakdownColumns = 3;
+                const int rowTop = breakdownCard.top + ScaleForDpi(hwnd_, 27);
+                const int rowHeight = ScaleForDpi(hwnd_, 37);
+                for (int index = 0; index < 5; ++index) {
+                    const int row = index / kBreakdownColumns;
+                    const int column = index % kBreakdownColumns;
+                    const int left = breakdownLeft + breakdownWidth * column / kBreakdownColumns;
+                    const int right = breakdownLeft + breakdownWidth * (column + 1) / kBreakdownColumns;
+                    const int top = rowTop + row * rowHeight;
+                    const int bottom = row == 1
+                        ? breakdownCard.bottom - ScaleForDpi(hwnd_, 5)
+                        : top + rowHeight;
+                    drawOpaqueTextLine(
+                        textFormatFoot_.Get(), breakdownTitles[index],
+                        MakeRect(left, top, right, top + ScaleForDpi(hwnd_, 18)),
+                        textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+                    const std::wstring value = localAvailable
+                        ? (formatActivityCount(todayBreakdown[index]) + L" / "
+                            + formatActivityCount(totalBreakdown[index]))
+                        : L"--";
+                    drawOpaqueTextLine(
+                        textFormatFoot_.Get(), value,
+                        MakeRect(left, top + ScaleForDpi(hwnd_, 17), right, bottom),
+                        textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
             }
             y = breakdownCard.bottom + cardGap;
 
@@ -3367,6 +3462,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                 panelRect.bottom - ScaleForDpi(hwnd_, 46),
                 panelRect.right - fullPad,
                 panelRect.bottom - ScaleForDpi(hwnd_, 12));
+            fillInteractiveHitTarget(refreshButtonRect_);
             const bool anyRefreshInFlight = refreshInFlight_ || localUsageInFlight_;
             if (anyRefreshInFlight) {
                 fillEllipse(
@@ -3677,6 +3773,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             panelRect.bottom - ScaleForDpi(hwnd_, 46),
             panelRect.right - fullPad,
             panelRect.bottom - ScaleForDpi(hwnd_, 12));
+        fillInteractiveHitTarget(refreshButtonRect_);
         if (refreshInFlight_) {
             fillEllipse(
                 D2D1::Ellipse(

@@ -157,6 +157,7 @@ private:
     COLORREF ColorForRemainingPercent(int remainingPercent, bool forBackground) const;
 
     HINSTANCE instance_ = nullptr;
+    HWND ownerHwnd_ = nullptr;
     HWND hwnd_ = nullptr;
     std::atomic_bool refreshInFlight_ = false;
     std::atomic_bool releaseCheckInFlight_ = false;

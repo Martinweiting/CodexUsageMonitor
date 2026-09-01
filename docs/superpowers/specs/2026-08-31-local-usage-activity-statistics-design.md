@@ -137,7 +137,7 @@ UI 使用「今日 Token」及「本機累計 Token」，不得使用「帳戶�
 活動頁包含：
 
 - 六張摘要卡：今日 Token、本機累計 Token、今日任務、本機任務、今日回合、本機回合。
-- Token 分類卡：今日與累計的 input、output、cached、cache write、reasoning。
+- Token 分類卡：今日與累計的 input、output、cached、cache write、reasoning。繁體中文頁面改為三欄兩列，避免中文單位造成擁擠。
 - 帳戶狀態卡：允許／受限、credits balance／unlimited、預估本機／雲端訊息區間、spend control、適用 reset credits；資料缺少時顯示 `--` 或省略。
 - 資料狀態卡：紀錄起始日、最後事件、最後掃描、索引中／partial／ready、檔案數與本輪讀取量。
 - 活動頁刷新按鈕同時觸發遠端與本機刷新。
@@ -159,7 +159,7 @@ UI 使用「今日 Token」及「本機累計 Token」，不得使用「帳戶�
 - partial 狀態必須可見，但仍顯示已成功解析的數字。
 - 本機根目錄不存在時顯示 unavailable，不建立假零值。
 - 所有數字使用 64-bit 無號計數並具備溢位保護。
-- 大數字採 K／M／B／T 緊湊格式，詳細分項仍維持可辨識的數值。
+- 英文介面的大數字採 K／M／B／T 緊湊格式；繁體中文介面改用符合中文習慣的萬／億／兆／京（例如 37.7 million 顯示為 3770 萬），詳細分項仍維持可辨識的數值。
 
 ## 8. 驗收要求
 

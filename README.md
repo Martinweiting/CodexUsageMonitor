@@ -13,9 +13,11 @@ Traditional Chinese documentation: [README-zh.md](README-zh.md)
 - Supports full, simple, and taskbar display modes.
 - Uses a compact transparent Codex bubble in full and simple modes.
 - Supports dragging, resizing, position locking, always-on-top, and startup launch.
-- Provides a glass-transparency setting from 20% to 80%.
+- Provides a glass-transparency setting from 0% to 80%; lower values are more opaque.
 - Refreshes usage data automatically every 60 seconds and supports manual refresh.
 - Provides English and Traditional Chinese interfaces.
+- Uses Quantico for English and Latin text, and Iansui for Traditional Chinese text.
+- Formats large Traditional Chinese activity counts with natural units such as `3770 萬` and `893 億`.
 - Uses read-only rate-limit reset information; it does not consume or reset credits.
 - Stores widget settings in `%APPDATA%\CodexUsageMonitor\settings.ini`.
 

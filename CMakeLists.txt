@@ -4,7 +4,7 @@ project(CodexUsageMonitor VERSION 0.1.0 LANGUAGES CXX)
 
 option(CODEX_USAGE_MONITOR_BUILD_TESTS "Build native CodexUsageMonitor tests" OFF)
 option(CODEX_USAGE_MONITOR_UI_TEST_WINDOW "Expose the widget as an app window for UI automation" OFF)
-set(CODEX_USAGE_MONITOR_UI_TEST_SCENARIO "0" CACHE STRING "UI test scenario: 0 quota, 1 activity, 2 simple, 3 taskbar, 4 activity zh")
+set(CODEX_USAGE_MONITOR_UI_TEST_SCENARIO "0" CACHE STRING "UI test scenario: 0 quota, 1 activity, 2 simple, 3 taskbar, 4 activity zh, 5 quota on secondary monitor")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

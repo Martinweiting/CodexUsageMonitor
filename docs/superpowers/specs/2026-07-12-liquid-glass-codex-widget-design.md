@@ -160,7 +160,7 @@ The full-mode text button becomes a borderless circular-arrow glyph:
 Add a `設定…` context-menu command that opens a small transient glass settings panel. This is not a second persistent usage widget and does not change the single-widget architecture.
 
 - Add a horizontal slider labeled `玻璃透明度`.
-- Use a 20%–80% range, with a 42% default.
+- Use a 0%–80% range, with a 42% default; lower values make the glass more opaque.
 - Show the current percentage and the hint `數值越高，玻璃越透明`.
 - Apply changes live to the bubble, full, simple, and taskbar glass surfaces.
 - Keep text, status markers, and pointer hit regions readable and functional at all supported values.
@@ -204,4 +204,3 @@ Build and smoke verification:
 - Search `src` and `README-zh.md` for Simplified Chinese remnants and for reset-credit consumption strings.
 - Launch the executable and verify that startup shows only the icon; hover expands; moving away collapses when unpinned; clicking pins; moving away preserves pinned content; bubble and `×` collapse; dragging and lock position work; the three modes render; the refresh glyph works; settings change transparency live; and the value persists after restart.
 - Verify the full panel has no reset-credit action button and retains only read-only reset inventory information.
-

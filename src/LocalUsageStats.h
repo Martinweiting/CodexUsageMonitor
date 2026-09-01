@@ -70,5 +70,9 @@ private:
 };
 
 std::wstring FormatCompactCount(std::uint64_t value);
+// Formats large counts with Traditional-Chinese units (萬／億／兆／京).
+// Values below 10,000 remain plain integers so small activity counts stay
+// precise and easy to scan.
+std::wstring FormatTraditionalChineseCount(std::uint64_t value);
 
 }  // namespace codex_usage

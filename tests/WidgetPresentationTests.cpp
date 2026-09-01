@@ -231,7 +231,8 @@ int main(int argc, char** argv) {
             : 2;
     }
 
-    assert(codex_widget::ClampTransparencyPercent(5) == 20);
+    assert(codex_widget::ClampTransparencyPercent(-5) == 0);
+    assert(codex_widget::ClampTransparencyPercent(5) == 5);
     assert(codex_widget::ClampTransparencyPercent(42) == 42);
     assert(codex_widget::ClampTransparencyPercent(95) == 80);
 
@@ -323,9 +324,10 @@ int main(int argc, char** argv) {
     assert(codex_widget::FullModeHeightForCreditRows(620, 1, 20) == 620);
     assert(codex_widget::FullModeHeightForCreditRows(620, 3, 20) == 660);
 
-    assert(codex_widget::TransparencyPercentForSlider(0, 0, 100) == 20);
-    assert(codex_widget::TransparencyPercentForSlider(50, 0, 100) == 50);
+    assert(codex_widget::TransparencyPercentForSlider(0, 0, 100) == 0);
+    assert(codex_widget::TransparencyPercentForSlider(50, 0, 100) == 40);
     assert(codex_widget::TransparencyPercentForSlider(100, 0, 100) == 80);
+    assert(codex_widget::TransparencyPercentForSlider(40, 40, 40) == 0);
     assert(codex_widget::TransitionOnSettingsClose() == PresentationState::Bubble);
     assert(codex_widget::kTaskbarWidgetLogicalDiameter == 96);
     assert(codex_widget::kTaskbarWidgetLogicalWidth == 96);
@@ -342,6 +344,11 @@ int main(int argc, char** argv) {
     assert(codex_usage::FormatCompactCount(999) == L"999");
     assert(codex_usage::FormatCompactCount(1500) == L"1.5K");
     assert(codex_usage::FormatCompactCount(1250000) == L"1.3M");
+    assert(codex_usage::FormatTraditionalChineseCount(999) == L"999");
+    assert(codex_usage::FormatTraditionalChineseCount(12345) == L"1.2 萬");
+    assert(codex_usage::FormatTraditionalChineseCount(37700000) == L"3770 萬");
+    assert(codex_usage::FormatTraditionalChineseCount(89300000000) == L"893 億");
+    assert(codex_usage::FormatTraditionalChineseCount(1200000000000) == L"1.2 兆");
     assert(codex_widget::HoverStateForCursor(
         PresentationState::Bubble, DisplayMode::Full, true, true)
         == PresentationState::HoverExpanded);
