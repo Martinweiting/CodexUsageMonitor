@@ -1,14 +1,232 @@
 #include "WidgetPresentation.h"
+#include "LocalUsageStats.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 using codex_widget::DisplayMode;
 using codex_widget::PresentationState;
 
-int main() {
+namespace {
+
+class TemporaryDirectory {
+public:
+    TemporaryDirectory() {
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path()
+            / (L"CodexUsageMonitorTests-" + std::to_wstring(nonce));
+        std::filesystem::create_directories(path);
+    }
+
+    ~TemporaryDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+
+    std::filesystem::path path;
+};
+
+void WriteText(const std::filesystem::path& path, const std::string& text) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    assert(output);
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    assert(output);
+}
+
+void AppendText(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    assert(output);
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    assert(output);
+}
+
+std::string ReadText(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream output;
+    output << input.rdbuf();
+    return output.str();
+}
+
+std::string TokenLine(
+    const char* timestamp,
+    std::uint64_t input,
+    std::uint64_t cached,
+    std::uint64_t cacheWrite,
+    std::uint64_t output,
+    std::uint64_t reasoning,
+    std::uint64_t total) {
+    std::ostringstream line;
+    line << "{\"timestamp\":\"" << timestamp
+         << "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\","
+            "\"info\":{\"total_token_usage\":{"
+         << "\"input_tokens\":" << input
+         << ",\"cached_input_tokens\":" << cached
+         << ",\"cache_write_input_tokens\":" << cacheWrite
+         << ",\"output_tokens\":" << output
+         << ",\"reasoning_output_tokens\":" << reasoning
+         << ",\"total_tokens\":" << total << "}}}}";
+    return line.str();
+}
+
+void VerifyLocalUsageIncrementalIndex() {
+    TemporaryDirectory temporary;
+    const std::filesystem::path codexHome = temporary.path / L"codex-home";
+    const std::filesystem::path sessions = codexHome / L"sessions" / L"2026" / L"08" / L"31";
+    const std::filesystem::path archive = codexHome / L"archived_sessions";
+    const std::filesystem::path sessionA = sessions / L"session-a.jsonl";
+    const std::filesystem::path fork = sessions / L"session-fork.jsonl";
+    const std::filesystem::path subagent = sessions / L"session-subagent.jsonl";
+    const std::filesystem::path index = codexHome / L"session_index.jsonl";
+    const std::filesystem::path cache = temporary.path / L"cache" / L"local-usage-cache-v1.tsv";
+
+    const std::string metaA =
+        R"({"timestamp":"2026-08-30T11:00:00Z","type":"session_meta","payload":{"id":"A","thread_source":"user"}})";
+    const std::string userYesterday =
+        R"({"timestamp":"2026-08-30T12:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"SECRET_TEST_PROMPT"}})";
+    const std::string tokenYesterday = TokenLine("2026-08-30T12:01:00Z", 100, 40, 0, 10, 2, 110);
+    const std::string tokenRepeated = TokenLine("2026-08-30T13:00:00Z", 100, 40, 0, 10, 2, 110);
+    const std::string userToday =
+        R"({"timestamp":"2026-08-31T01:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"today"}]}})";
+    const std::string tokenToday = TokenLine("2026-08-31T01:01:00Z", 150, 60, 0, 20, 4, 170);
+    const std::string tokenReset = TokenLine("2026-08-31T02:00:00Z", 5, 1, 0, 2, 1, 7);
+
+    const std::string aContent = metaA + "\n" + userYesterday + "\n" + tokenYesterday + "\n"
+        + tokenRepeated + "\n" + userToday + "\n" + tokenToday + "\n" + tokenReset + "\n";
+    WriteText(sessionA, aContent);
+    // A fork contains copied parent history. The original session id and timestamps must deduplicate it.
+    WriteText(fork, metaA + "\n" + userYesterday + "\n" + tokenYesterday + "\n"
+        + tokenRepeated + "\n" + userToday + "\n" + tokenToday + "\n" + tokenReset + "\n");
+    WriteText(subagent,
+        R"({"timestamp":"2026-08-31T02:30:00Z","type":"session_meta","payload":{"id":"B","source":{"subagent":{"kind":"worker"}}}})"
+        "\n"
+        R"({"timestamp":"2026-08-31T02:31:00Z","type":"event_msg","payload":{"type":"user_message","message":"background"}})"
+        "\n" + TokenLine("2026-08-31T02:32:00Z", 25, 5, 0, 5, 2, 30) + "\n");
+    WriteText(index,
+        R"({"id":"A","thread_name":"Main task","updated_at":"2026-08-31T02:00:00Z"})"
+        "\n"
+        R"({"id":"INDEX_ONLY","thread_name":"Indexed task","updated_at":"2026-08-31T02:00:00Z"})"
+        "\n");
+
+    constexpr long long todayStart = 1788134400;
+    constexpr long long now = 1788220799;
+    const codex_usage::LocalUsagePaths paths{ codexHome, cache };
+    codex_usage::LocalUsageStatsCollector collector(paths);
+    const codex_usage::LocalUsageSnapshot first = collector.Refresh({}, now, todayStart);
+    assert(first.available);
+    assert(!first.partial);
+    assert(first.filesDiscovered == 4);
+    assert(first.bytesReadThisScan > 0);
+    assert(first.recordedTotal.totalTokens == 207);
+    assert(first.today.totalTokens == 97);
+    assert(first.recordedTotal.inputTokens == 180);
+    assert(first.recordedTotal.outputTokens == 27);
+    assert(first.recordedTotal.cachedInputTokens == 66);
+    assert(first.recordedTaskCount == 2);
+    assert(first.todayTaskCount == 1);
+    assert(first.recordedTurnCount == 2);
+    assert(first.todayTurnCount == 1);
+    assert(ReadText(cache).find("SECRET_TEST_PROMPT") == std::string::npos);
+
+    // A restarted collector must load the cache and read no JSONL bytes when nothing changed.
+    codex_usage::LocalUsageStatsCollector restarted(paths);
+    const codex_usage::LocalUsageSnapshot unchanged = restarted.Refresh({}, now, todayStart);
+    assert(unchanged.available);
+    assert(unchanged.cacheLoaded);
+    assert(unchanged.bytesReadThisScan == 0);
+    assert(!unchanged.changed);
+    assert(unchanged.recordedTotal.totalTokens == 207);
+
+    // Moving an active file to archived_sessions retains its filename checkpoint.
+    std::filesystem::create_directories(archive);
+    const std::filesystem::path archivedA = archive / sessionA.filename();
+    std::filesystem::rename(sessionA, archivedA);
+    const codex_usage::LocalUsageSnapshot moved = restarted.Refresh({}, now, todayStart);
+    assert(moved.bytesReadThisScan == 0);
+    assert(moved.recordedTotal.totalTokens == 207);
+
+    const std::string appended = TokenLine("2026-08-31T04:00:00Z", 10, 2, 0, 5, 2, 15) + "\n"
+        + R"({"timestamp":"2026-08-31T04:01:00Z","type":"event_msg","payload":{"type":"user_message","message":"new"}})"
+        + "\n";
+    AppendText(archivedA, appended);
+    const codex_usage::LocalUsageSnapshot incremented = restarted.Refresh({}, now, todayStart);
+    assert(incremented.bytesReadThisScan == appended.size());
+    assert(incremented.filesReadThisScan == 1);
+    assert(incremented.recordedTotal.totalTokens == 215);
+    assert(incremented.today.totalTokens == 105);
+    assert(incremented.recordedTurnCount == 3);
+    assert(incremented.todayTurnCount == 2);
+
+    // An unterminated tail is left at the old offset until its newline arrives.
+    const std::string incomplete = TokenLine("2026-08-31T05:00:00Z", 13, 2, 0, 7, 2, 20);
+    AppendText(archivedA, incomplete);
+    const codex_usage::LocalUsageSnapshot deferred = restarted.Refresh({}, now, todayStart);
+    assert(deferred.bytesReadThisScan == 0);
+    assert(deferred.recordedTotal.totalTokens == 215);
+    AppendText(archivedA, "\n");
+    const codex_usage::LocalUsageSnapshot completed = restarted.Refresh({}, now, todayStart);
+    assert(completed.bytesReadThisScan == incomplete.size() + 1);
+    assert(completed.recordedTotal.totalTokens == 220);
+    assert(completed.today.totalTokens == 110);
+
+    // A shrunken file invalidates checkpoints and rebuilds instead of layering onto stale totals.
+    WriteText(fork, "");
+    const codex_usage::LocalUsageSnapshot rebuilt = restarted.Refresh({}, now, todayStart);
+    assert(rebuilt.rebuilt);
+    assert(rebuilt.recordedTotal.totalTokens == 220);
+    assert(ReadText(cache).find("SECRET_TEST_PROMPT") == std::string::npos);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc == 4 && std::string(argv[1]) == "--scan-local") {
+        const codex_usage::LocalUsagePaths paths{
+            std::filesystem::path(argv[2]),
+            std::filesystem::path(argv[3]),
+        };
+        codex_usage::LocalUsageStatsCollector collector(paths);
+        const codex_usage::LocalUsageSnapshot first = collector.Refresh();
+        const codex_usage::LocalUsageSnapshot second = collector.Refresh();
+        const codex_usage::LocalUsageSnapshot stable = collector.Refresh();
+        const auto printSnapshot = [](const char* label, const codex_usage::LocalUsageSnapshot& value) {
+            std::cout << label
+                      << " available=" << value.available
+                      << " files=" << value.filesDiscovered
+                      << " files_read=" << value.filesReadThisScan
+                      << " bytes_read=" << value.bytesReadThisScan
+                      << " token_events=" << value.tokenEventCount
+                      << " today_tokens=" << value.today.totalTokens
+                      << " local_tokens=" << value.recordedTotal.totalTokens
+                      << " today_tasks=" << value.todayTaskCount
+                      << " local_tasks=" << value.recordedTaskCount
+                      << " today_turns=" << value.todayTurnCount
+                      << " local_turns=" << value.recordedTurnCount
+                      << " partial=" << value.partial
+                      << " rebuilt=" << value.rebuilt
+                      << '\n';
+        };
+        printSnapshot("first", first);
+        printSnapshot("second", second);
+        printSnapshot("stable", stable);
+        if (!first.errorMessage.empty()) {
+            std::wcerr << L"first_error=" << first.errorMessage << L'\n';
+        }
+        if (!second.errorMessage.empty()) {
+            std::wcerr << L"second_error=" << second.errorMessage << L'\n';
+        }
+        return first.available && first.filesDiscovered > 0 && first.tokenEventCount > 0
+                && second.available && stable.available && stable.bytesReadThisScan == 0
+            ? 0
+            : 2;
+    }
+
     assert(codex_widget::ClampTransparencyPercent(5) == 20);
     assert(codex_widget::ClampTransparencyPercent(42) == 42);
     assert(codex_widget::ClampTransparencyPercent(95) == 80);
@@ -112,6 +330,14 @@ int main() {
     assert(codex_widget::DisplayModeUsesFloatingBubble(DisplayMode::Full));
     assert(codex_widget::DisplayModeUsesFloatingBubble(DisplayMode::Simple));
     assert(!codex_widget::DisplayModeUsesFloatingBubble(DisplayMode::Taskbar));
+    assert(codex_widget::kSimpleWidgetLogicalHeight == 154);
+    assert(codex_widget::FullPageAfterTabClick(
+        codex_widget::FullPage::Quota, false, true) == codex_widget::FullPage::Activity);
+    assert(codex_widget::FullPageAfterTabClick(
+        codex_widget::FullPage::Activity, true, false) == codex_widget::FullPage::Quota);
+    assert(codex_usage::FormatCompactCount(999) == L"999");
+    assert(codex_usage::FormatCompactCount(1500) == L"1.5K");
+    assert(codex_usage::FormatCompactCount(1250000) == L"1.3M");
     assert(codex_widget::HoverStateForCursor(
         PresentationState::Bubble, DisplayMode::Full, true, true)
         == PresentationState::HoverExpanded);
@@ -202,10 +428,67 @@ int main() {
     assert(bothWindowsPayload.fiveHour.remainingPercent == 98);
     assert(bothWindowsPayload.weekly.remainingPercent == 55);
 
+    const UsageSnapshot enrichedPayload = fetcher.ParseUsageJson(
+        R"({
+            "rate_limit":{
+                "allowed":false,
+                "limit_reached":true,
+                "primary_window":{"used_percent":2,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":45,"limit_window_seconds":604800}
+            },
+            "rate_limit_reached_type":"weekly",
+            "credits":{
+                "has_credits":true,
+                "unlimited":false,
+                "overage_limit_reached":false,
+                "balance":12.5,
+                "approx_local_messages":[4,8],
+                "approx_cloud_messages":[2,5]
+            },
+            "spend_control":{"reached":false},
+            "rate_limit_reset_credits":{"applicable_available_count":2}
+        })",
+        &parseError);
+    assert(enrichedPayload.success);
+    assert(enrichedPayload.endpointStatus.hasAllowed && !enrichedPayload.endpointStatus.allowed);
+    assert(enrichedPayload.endpointStatus.hasLimitReached && enrichedPayload.endpointStatus.limitReached);
+    assert(enrichedPayload.endpointStatus.rateLimitReachedType == L"weekly");
+    assert(enrichedPayload.credits.available);
+    assert(enrichedPayload.credits.hasCredits && enrichedPayload.credits.creditsEnabled);
+    assert(enrichedPayload.credits.hasBalance && enrichedPayload.credits.balance == 12.5);
+    assert(enrichedPayload.credits.hasApproxLocalMessages);
+    assert(enrichedPayload.credits.approxLocalMessagesMin == 4);
+    assert(enrichedPayload.credits.approxLocalMessagesMax == 8);
+    assert(enrichedPayload.credits.hasApproxCloudMessages);
+    assert(enrichedPayload.spendControl.hasReached && !enrichedPayload.spendControl.reached);
+    assert(enrichedPayload.hasApplicableResetCredits && enrichedPayload.applicableResetCredits == 2);
+
+    const UsageSnapshot nullOptionalPayload = fetcher.ParseUsageJson(
+        R"({
+            "rate_limit":{
+                "allowed":null,
+                "limit_reached":"no",
+                "primary_window":{"used_percent":1,"limit_window_seconds":18000}
+            },
+            "credits":{"balance":"unknown","approx_local_messages":null},
+            "spend_control":null,
+            "rate_limit_reset_credits":{"applicable_available_count":"two"}
+        })",
+        &parseError);
+    assert(nullOptionalPayload.success);
+    assert(!nullOptionalPayload.endpointStatus.hasAllowed);
+    assert(!nullOptionalPayload.endpointStatus.hasLimitReached);
+    assert(nullOptionalPayload.credits.available && !nullOptionalPayload.credits.hasBalance);
+    assert(!nullOptionalPayload.credits.hasApproxLocalMessages);
+    assert(!nullOptionalPayload.spendControl.hasReached);
+    assert(!nullOptionalPayload.hasApplicableResetCredits);
+
     const UsageSnapshot invalidPayload = fetcher.ParseUsageJson(
         R"({"rate_limit":{"primary_window":null,"secondary_window":{"used_percent":"12"}}})",
         &parseError);
     assert(!invalidPayload.success);
+
+    VerifyLocalUsageIncrementalIndex();
 
     std::cout << "WidgetPresentationTests passed\n";
     return 0;

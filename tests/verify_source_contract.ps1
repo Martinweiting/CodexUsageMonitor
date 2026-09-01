@@ -5,6 +5,8 @@ $files = @(
     'src/WidgetPresentation.cpp',
     'src/CodexUsageFetcher.h',
     'src/CodexUsageFetcher.cpp'
+    'src/LocalUsageStats.h'
+    'src/LocalUsageStats.cpp'
 )
 $content = ($files | ForEach-Object { Get-Content -Raw -Encoding UTF8 $_ }) -join "`n"
 $forbidden = @(
@@ -17,6 +19,7 @@ $forbidden = @(
     'RequestConsumeResetCredit',
     'resetCreditConfirmStep_',
     'CreateRedeemRequestId'
+    '.detach()'
 )
 $found = @($forbidden | Where-Object { $content.Contains($_) })
 if ($found.Count -gt 0) {
@@ -56,6 +59,14 @@ $required = @(
     'const bool usesFloatingBubble = !taskbarMode_',
     'SetWindowRgn(hwnd_',
     'const int split = half.left + (RectWidth(half) * 35) / 100'
+    'local-usage-cache-v1.tsv'
+    'kLocalUsageRefreshMilliseconds = 15 * 1000'
+    'std::jthread'
+    'request_stop()'
+    'RequestLocalUsageRefresh'
+    'FullPageAfterTabClick'
+    'Today tokens'
+    ([string]::Concat([char]0x4ECA, [char]0x65E5, ' Token'))
 )
 $missing = @($required | Where-Object { -not $content.Contains($_) })
 if ($missing.Count -gt 0) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CodexUsageFetcher.h"
+#include "LocalUsageStats.h"
 #include "WidgetPresentation.h"
 
 #include <Windows.h>
@@ -11,7 +12,10 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <filesystem>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 class AppBarWindow {
@@ -25,10 +29,12 @@ public:
 private:
     static constexpr UINT kUsageUpdatedMessage = WM_APP + 1;
     static constexpr UINT kReleaseVersionUpdatedMessage = WM_APP + 2;
+    static constexpr UINT kLocalUsageUpdatedMessage = WM_APP + 3;
     static constexpr UINT_PTR kCountdownTimerId = 1;
     static constexpr UINT_PTR kRefreshTimerId = 2;
     static constexpr UINT_PTR kHoverExitTimerId = 3;
     static constexpr UINT_PTR kHoverPollTimerId = 4;
+    static constexpr UINT_PTR kLocalUsageTimerId = 5;
 
     enum class Language {
         English = 0,
@@ -89,9 +95,12 @@ private:
     void ActivateBubbleClick();
 
     void RequestRefresh(bool force);
-    void OnUsageUpdated(UsageSnapshot* snapshot);
+    void OnUsageUpdated();
     void RequestLatestReleaseCheck(bool force);
-    void OnLatestReleaseChecked(ReleaseVersionInfo* info);
+    void OnLatestReleaseChecked();
+    void RequestLocalUsageRefresh(bool force);
+    void OnLocalUsageUpdated();
+    void StopBackgroundWorkers();
     bool TryHandleControlClick(POINT clientPoint);
     bool TryHandleRefreshButtonClick(POINT clientPoint);
     std::wstring BuildResetCreditsSummaryText() const;
@@ -151,6 +160,8 @@ private:
     HWND hwnd_ = nullptr;
     std::atomic_bool refreshInFlight_ = false;
     std::atomic_bool releaseCheckInFlight_ = false;
+    std::atomic_bool localUsageInFlight_ = false;
+    std::atomic_bool shuttingDown_ = false;
     bool lightTheme_ = false;
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
@@ -165,6 +176,7 @@ private:
     bool settingsOpen_ = false;
     bool settingsDragging_ = false;
     Language language_ = Language::English;
+    codex_widget::FullPage fullPage_ = codex_widget::FullPage::Quota;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
     DragMode dragMode_ = DragMode::None;
@@ -187,6 +199,8 @@ private:
     RECT closeButtonRect_ = {};
     RECT bubbleButtonRect_ = {};
     RECT settingsSliderRect_ = {};
+    RECT quotaTabRect_ = {};
+    RECT activityTabRect_ = {};
     HDC layeredDc_ = nullptr;
     HBITMAP layeredBitmap_ = nullptr;
     HBITMAP layeredPreviousBitmap_ = nullptr;
@@ -198,6 +212,15 @@ private:
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;
+    codex_usage::LocalUsageSnapshot localUsageSnapshot_;
+    codex_usage::LocalUsageStatsCollector localUsageCollector_;
+    std::mutex backgroundResultMutex_;
+    std::optional<UsageSnapshot> pendingUsageResult_;
+    std::optional<ReleaseVersionInfo> pendingReleaseResult_;
+    std::optional<codex_usage::LocalUsageSnapshot> pendingLocalUsageResult_;
+    std::jthread usageWorker_;
+    std::jthread releaseWorker_;
+    std::jthread localUsageWorker_;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;

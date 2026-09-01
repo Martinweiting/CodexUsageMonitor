@@ -35,6 +35,7 @@ add_executable(CodexUsageMonitor WIN32
     src/AppBarWindow.cpp
     src/CodexUsageFetcher.cpp
     src/JsonLite.cpp
+    src/LocalUsageStats.cpp
     src/WidgetPresentation.cpp
 )
 
@@ -77,6 +78,7 @@ if(CODEX_USAGE_MONITOR_BUILD_TESTS)
         tests/WidgetPresentationTests.cpp
         src/CodexUsageFetcher.cpp
         src/JsonLite.cpp
+        src/LocalUsageStats.cpp
         src/WidgetPresentation.cpp
     )
     target_include_directories(CodexUsageMonitorTests PRIVATE src)

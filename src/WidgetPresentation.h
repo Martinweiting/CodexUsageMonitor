@@ -8,6 +8,7 @@ namespace codex_widget {
 
 enum class PresentationState { Bubble, HoverExpanded, PinnedExpanded };
 enum class DisplayMode { Full, Simple, Taskbar };
+enum class FullPage { Quota, Activity };
 enum class LanguageKind { English, TraditionalChinese };
 enum class UsageStatus { Loading, Failed, Normal, Tight, Exhausted };
 
@@ -15,6 +16,7 @@ constexpr int kTaskbarWidgetLogicalDiameter = 96;
 constexpr int kTaskbarWidgetLogicalWidth = kTaskbarWidgetLogicalDiameter;
 constexpr int kTaskbarWidgetLogicalHeight = kTaskbarWidgetLogicalDiameter;
 constexpr int kTaskbarWidgetLogicalSize = kTaskbarWidgetLogicalDiameter;
+constexpr int kSimpleWidgetLogicalHeight = 154;
 
 struct WidgetRect {
     int left = 0;
@@ -54,6 +56,7 @@ PresentationState HoverStateForCursor(
     bool cursorInsideWindow);
 bool IsDragGesture(int deltaX, int deltaY, int threshold);
 bool DisplayModeUsesFloatingBubble(DisplayMode mode);
+FullPage FullPageAfterTabClick(FullPage current, bool quotaClicked, bool activityClicked);
 int ClampTransparencyPercent(int value);
 int TransparencyPercentForSlider(int x, int left, int right);
 WidgetRect BubbleGeometryForExpandedRect(const WidgetRect& expanded, int bubbleSize);

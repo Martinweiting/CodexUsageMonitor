@@ -49,6 +49,16 @@ bool DisplayModeUsesFloatingBubble(DisplayMode mode) {
     return mode != DisplayMode::Taskbar;
 }
 
+FullPage FullPageAfterTabClick(FullPage current, bool quotaClicked, bool activityClicked) {
+    if (quotaClicked) {
+        return FullPage::Quota;
+    }
+    if (activityClicked) {
+        return FullPage::Activity;
+    }
+    return current;
+}
+
 int ClampTransparencyPercent(int value) {
     return std::clamp(value, 20, 80);
 }

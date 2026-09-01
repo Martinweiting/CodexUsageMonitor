@@ -14,6 +14,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
@@ -376,6 +377,46 @@ void AssignUsageWindows(
     }
 }
 
+void ExtractOptionalBool(
+    const jsonlite::Value* parent,
+    std::string_view key,
+    bool* hasValue,
+    bool* output) {
+    if (parent == nullptr || hasValue == nullptr || output == nullptr) {
+        return;
+    }
+    const jsonlite::Value* node = parent->Find(key);
+    const auto value = node != nullptr ? node->AsBool() : std::nullopt;
+    if (value.has_value()) {
+        *hasValue = true;
+        *output = *value;
+    }
+}
+
+bool ExtractApproximateRange(
+    const jsonlite::Value* parent,
+    std::string_view key,
+    long long* minimum,
+    long long* maximum) {
+    if (parent == nullptr || minimum == nullptr || maximum == nullptr) {
+        return false;
+    }
+    const jsonlite::Value* node = parent->Find(key);
+    const auto* values = node != nullptr ? node->AsArray() : nullptr;
+    if (values == nullptr || values->size() != 2) {
+        return false;
+    }
+    const auto low = (*values)[0].AsNumber();
+    const auto high = (*values)[1].AsNumber();
+    if (!low.has_value() || !high.has_value() || !std::isfinite(*low) || !std::isfinite(*high)
+        || *low < 0.0 || *high < *low) {
+        return false;
+    }
+    *minimum = static_cast<long long>(std::llround(*low));
+    *maximum = static_cast<long long>(std::llround(*high));
+    return true;
+}
+
 std::optional<std::string> Base64UrlDecode(const std::string& input) {
     std::string normalized;
     normalized.reserve(input.size() + 4);
@@ -645,6 +686,52 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
     }
     if (auto planTypeString = planType != nullptr ? planType->AsString() : std::nullopt; planTypeString.has_value()) {
         snapshot.planType = Utf8ToWide(std::string(*planTypeString));
+    }
+
+    ExtractOptionalBool(
+        rateLimit, "allowed", &snapshot.endpointStatus.hasAllowed, &snapshot.endpointStatus.allowed);
+    ExtractOptionalBool(
+        rateLimit, "limit_reached", &snapshot.endpointStatus.hasLimitReached,
+        &snapshot.endpointStatus.limitReached);
+    if (const jsonlite::Value* reachedType = root->Find("rate_limit_reached_type"); reachedType != nullptr) {
+        if (const auto value = reachedType->AsString(); value.has_value()) {
+            snapshot.endpointStatus.rateLimitReachedType = Utf8ToWide(std::string(*value));
+        }
+    }
+
+    const jsonlite::Value* credits = root->Find("credits");
+    if (credits != nullptr && credits->IsObject()) {
+        snapshot.credits.available = true;
+        ExtractOptionalBool(credits, "has_credits", &snapshot.credits.hasCredits, &snapshot.credits.creditsEnabled);
+        ExtractOptionalBool(credits, "unlimited", &snapshot.credits.hasUnlimited, &snapshot.credits.unlimited);
+        ExtractOptionalBool(
+            credits, "overage_limit_reached", &snapshot.credits.hasOverageLimitReached,
+            &snapshot.credits.overageLimitReached);
+        if (const jsonlite::Value* balance = credits->Find("balance"); balance != nullptr) {
+            if (const auto value = balance->AsNumber(); value.has_value() && std::isfinite(*value)) {
+                snapshot.credits.hasBalance = true;
+                snapshot.credits.balance = *value;
+            }
+        }
+        snapshot.credits.hasApproxLocalMessages = ExtractApproximateRange(
+            credits, "approx_local_messages", &snapshot.credits.approxLocalMessagesMin,
+            &snapshot.credits.approxLocalMessagesMax);
+        snapshot.credits.hasApproxCloudMessages = ExtractApproximateRange(
+            credits, "approx_cloud_messages", &snapshot.credits.approxCloudMessagesMin,
+            &snapshot.credits.approxCloudMessagesMax);
+    }
+
+    const jsonlite::Value* spendControl = root->Find("spend_control");
+    ExtractOptionalBool(
+        spendControl, "reached", &snapshot.spendControl.hasReached, &snapshot.spendControl.reached);
+    const jsonlite::Value* resetCredits = root->Find("rate_limit_reset_credits");
+    if (resetCredits != nullptr) {
+        const jsonlite::Value* applicable = resetCredits->Find("applicable_available_count");
+        if (const auto value = applicable != nullptr ? applicable->AsInt() : std::nullopt;
+            value.has_value() && *value >= 0) {
+            snapshot.hasApplicableResetCredits = true;
+            snapshot.applicableResetCredits = *value;
+        }
     }
 
     snapshot.success = true;

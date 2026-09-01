@@ -39,6 +39,37 @@ struct RateLimitResetCreditsInfo {
     bool hasNextExpiry = false;
 };
 
+struct UsageEndpointStatus {
+    bool hasAllowed = false;
+    bool allowed = false;
+    bool hasLimitReached = false;
+    bool limitReached = false;
+    std::wstring rateLimitReachedType;
+};
+
+struct UsageCreditsSummary {
+    bool available = false;
+    bool hasCredits = false;
+    bool creditsEnabled = false;
+    bool hasUnlimited = false;
+    bool unlimited = false;
+    bool hasOverageLimitReached = false;
+    bool overageLimitReached = false;
+    bool hasBalance = false;
+    double balance = 0.0;
+    bool hasApproxLocalMessages = false;
+    long long approxLocalMessagesMin = 0;
+    long long approxLocalMessagesMax = 0;
+    bool hasApproxCloudMessages = false;
+    long long approxCloudMessagesMin = 0;
+    long long approxCloudMessagesMax = 0;
+};
+
+struct SpendControlSummary {
+    bool hasReached = false;
+    bool reached = false;
+};
+
 struct UsageSnapshot {
     bool success = false;
     std::wstring email;
@@ -52,6 +83,11 @@ struct UsageSnapshot {
     UsageWindow fiveHour;
     UsageWindow weekly;
     RateLimitResetCreditsInfo resetCredits;
+    UsageEndpointStatus endpointStatus;
+    UsageCreditsSummary credits;
+    SpendControlSummary spendControl;
+    bool hasApplicableResetCredits = false;
+    int applicableResetCredits = 0;
 };
 
 struct ReleaseVersionInfo {

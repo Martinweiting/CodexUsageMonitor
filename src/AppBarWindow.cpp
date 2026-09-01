@@ -60,6 +60,7 @@ constexpr int kResizeGrip = 12;
 constexpr long long kDaySeconds = 24LL * 60 * 60;
 constexpr long long kWeekSeconds = 7LL * kDaySeconds;
 constexpr int kReleaseCheckIntervalSeconds = 6 * 60 * 60;
+constexpr UINT kLocalUsageRefreshMilliseconds = 15 * 1000;
 
 enum WINDOWCOMPOSITIONATTRIB {
     WCA_ACCENT_POLICY = 19,
@@ -159,7 +160,7 @@ int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
 }
 
 int CalculateSimpleMinimumWidgetHeight(HWND hwnd) {
-    return ScaleForDpi(hwnd, 132);
+    return ScaleForDpi(hwnd, codex_widget::kSimpleWidgetLogicalHeight);
 }
 
 int CalculateTaskbarWidgetHeight(HWND hwnd) {
@@ -327,6 +328,7 @@ PaceInfo BuildPaceInfo(const UsageSnapshot& snapshot) {
 AppBarWindow::AppBarWindow(HINSTANCE instance) : instance_(instance) {}
 
 AppBarWindow::~AppBarWindow() {
+    StopBackgroundWorkers();
     DiscardTextFormats();
     DiscardDeviceResources();
     DiscardLayeredSurface();
@@ -370,8 +372,10 @@ bool AppBarWindow::Create() {
     releaseCheckCountdownSeconds_ = kReleaseCheckIntervalSeconds;
     SetTimer(hwnd_, kCountdownTimerId, 1000, nullptr);
     SetTimer(hwnd_, kHoverPollTimerId, kHoverPollMilliseconds, nullptr);
+    SetTimer(hwnd_, kLocalUsageTimerId, kLocalUsageRefreshMilliseconds, nullptr);
     RestartRefreshTimer();
     RequestRefresh(true);
+    RequestLocalUsageRefresh(true);
     RequestLatestReleaseCheck(true);
     return true;
 }
@@ -424,6 +428,8 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             } else if (wParam == kRefreshTimerId) {
                 refreshCountdownSeconds_ = refreshIntervalSeconds_;
                 RequestRefresh(false);
+            } else if (wParam == kLocalUsageTimerId) {
+                RequestLocalUsageRefresh(false);
             }
             return 0;
 
@@ -616,19 +622,25 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         }
 
         case kUsageUpdatedMessage:
-            OnUsageUpdated(reinterpret_cast<UsageSnapshot*>(lParam));
+            OnUsageUpdated();
             return 0;
 
         case kReleaseVersionUpdatedMessage:
-            OnLatestReleaseChecked(reinterpret_cast<ReleaseVersionInfo*>(lParam));
+            OnLatestReleaseChecked();
+            return 0;
+
+        case kLocalUsageUpdatedMessage:
+            OnLocalUsageUpdated();
             return 0;
 
         case WM_DESTROY:
             KillTimer(hwnd_, kCountdownTimerId);
             KillTimer(hwnd_, kRefreshTimerId);
             KillTimer(hwnd_, kHoverPollTimerId);
+            KillTimer(hwnd_, kLocalUsageTimerId);
             StopHoverExitGuard();
             CancelMouseLeaveTracking();
+            StopBackgroundWorkers();
             DisableNativeGlassBackdrop();
             SaveSettings();
             DiscardTextFormats();
@@ -709,7 +721,7 @@ int AppBarWindow::GetMinimumWidgetHeight(int width) const {
     }
     int height = CalculateDetailedMinimumWidgetHeight(hwnd_, width);
     // Grow only for additional reset-credit rows (one row already in base height).
-    if (snapshot_.success && snapshot_.resetCredits.fetched) {
+    if (fullPage_ == codex_widget::FullPage::Quota && snapshot_.success && snapshot_.resetCredits.fetched) {
         const int extraRows = std::max(0, static_cast<int>(snapshot_.resetCredits.availableCredits.size()) - 1);
         height += extraRows * ScaleForDpi(hwnd_, 18);
     }
@@ -1218,6 +1230,9 @@ void AppBarWindow::LoadSettings() {
     language_ = GetPrivateProfileIntW(L"layout", L"language", 0, path.c_str()) == 1
         ? Language::Chinese
         : Language::English;
+    fullPage_ = GetPrivateProfileIntW(L"layout", L"full_page", 0, path.c_str()) == 1
+        ? codex_widget::FullPage::Activity
+        : codex_widget::FullPage::Quota;
     if (version < kLayoutVersion) {
         hasSavedRect_ = false;
         return;
@@ -1239,10 +1254,6 @@ void AppBarWindow::LoadSettings() {
 }
 
 void AppBarWindow::SaveSettings() const {
-    if (!hasSavedRect_) {
-        return;
-    }
-
     const std::wstring path = GetSettingsPath();
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
@@ -1254,10 +1265,13 @@ void AppBarWindow::SaveSettings() const {
     WritePrivateProfileStringW(L"layout", L"refresh_interval_seconds", std::to_wstring(refreshIntervalSeconds_).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"glass_transparency_percent", std::to_wstring(glassTransparencyPercent_).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"language", language_ == Language::Chinese ? L"1" : L"0", path.c_str());
-    WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"layout", L"width", std::to_wstring(RectWidth(savedRect_)).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"layout", L"height", std::to_wstring(RectHeight(savedRect_)).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"layout", L"full_page", fullPage_ == codex_widget::FullPage::Activity ? L"1" : L"0", path.c_str());
+    if (hasSavedRect_) {
+        WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
+        WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
+        WritePrivateProfileStringW(L"layout", L"width", std::to_wstring(RectWidth(savedRect_)).c_str(), path.c_str());
+        WritePrivateProfileStringW(L"layout", L"height", std::to_wstring(RectHeight(savedRect_)).c_str(), path.c_str());
+    }
 }
 
 std::wstring AppBarWindow::GetSettingsPath() const {
@@ -2103,19 +2117,39 @@ void AppBarWindow::RequestRefresh(bool force) {
     RenderLayeredSurface();
 
     const HWND target = hwnd_;
-    std::thread([this, target]() {
-        auto* result = new UsageSnapshot(fetcher_.Fetch());
-        PostMessageW(target, kUsageUpdatedMessage, 0, reinterpret_cast<LPARAM>(result));
-    }).detach();
+    if (usageWorker_.joinable()) {
+        usageWorker_.join();
+    }
+    usageWorker_ = std::jthread([this, target](std::stop_token stopToken) {
+        UsageSnapshot result = fetcher_.Fetch();
+        if (stopToken.stop_requested() || shuttingDown_) {
+            return;
+        }
+        {
+            std::lock_guard lock(backgroundResultMutex_);
+            pendingUsageResult_ = std::move(result);
+        }
+        if (!shuttingDown_) {
+            PostMessageW(target, kUsageUpdatedMessage, 0, 0);
+        }
+    });
 }
 
-void AppBarWindow::OnUsageUpdated(UsageSnapshot* snapshot) {
-    std::unique_ptr<UsageSnapshot> holder(snapshot);
+void AppBarWindow::OnUsageUpdated() {
+    if (usageWorker_.joinable()) {
+        usageWorker_.join();
+    }
+    std::optional<UsageSnapshot> result;
+    {
+        std::lock_guard lock(backgroundResultMutex_);
+        result = std::move(pendingUsageResult_);
+        pendingUsageResult_.reset();
+    }
     refreshInFlight_ = false;
     lastRefreshCompletedUnixSeconds_ = static_cast<long long>(std::time(nullptr));
     lastRefreshSucceeded_ = false;
-    if (snapshot != nullptr) {
-        snapshot_ = *snapshot;
+    if (result.has_value()) {
+        snapshot_ = std::move(*result);
         lastRefreshSucceeded_ = snapshot_.success;
         if (snapshot_.success) {
             lastSuccessfulRefreshUnixSeconds_ = static_cast<long long>(std::time(nullptr));
@@ -2141,22 +2175,42 @@ void AppBarWindow::RequestLatestReleaseCheck(bool force) {
     releaseCheckCountdownSeconds_ = kReleaseCheckIntervalSeconds;
 
     const HWND target = hwnd_;
-    std::thread([this, target]() {
-        auto* result = new ReleaseVersionInfo(fetcher_.FetchLatestRelease());
-        PostMessageW(target, kReleaseVersionUpdatedMessage, 0, reinterpret_cast<LPARAM>(result));
-    }).detach();
+    if (releaseWorker_.joinable()) {
+        releaseWorker_.join();
+    }
+    releaseWorker_ = std::jthread([this, target](std::stop_token stopToken) {
+        ReleaseVersionInfo result = fetcher_.FetchLatestRelease();
+        if (stopToken.stop_requested() || shuttingDown_) {
+            return;
+        }
+        {
+            std::lock_guard lock(backgroundResultMutex_);
+            pendingReleaseResult_ = std::move(result);
+        }
+        if (!shuttingDown_) {
+            PostMessageW(target, kReleaseVersionUpdatedMessage, 0, 0);
+        }
+    });
 }
 
-void AppBarWindow::OnLatestReleaseChecked(ReleaseVersionInfo* info) {
-    std::unique_ptr<ReleaseVersionInfo> holder(info);
+void AppBarWindow::OnLatestReleaseChecked() {
+    if (releaseWorker_.joinable()) {
+        releaseWorker_.join();
+    }
+    std::optional<ReleaseVersionInfo> result;
+    {
+        std::lock_guard lock(backgroundResultMutex_);
+        result = std::move(pendingReleaseResult_);
+        pendingReleaseResult_.reset();
+    }
     releaseCheckInFlight_ = false;
     lastReleaseCheckUnixSeconds_ = static_cast<long long>(std::time(nullptr));
 
-    if (info != nullptr) {
-        hasReleaseCheckResult_ = info->success;
-        releaseCheckErrorMessage_ = info->errorMessage;
-        if (info->success) {
-            latestReleaseTag_ = info->latestTag;
+    if (result.has_value()) {
+        hasReleaseCheckResult_ = result->success;
+        releaseCheckErrorMessage_ = result->errorMessage;
+        if (result->success) {
+            latestReleaseTag_ = result->latestTag;
             updateAvailable_ = CompareVersions(kCurrentVersion, latestReleaseTag_) < 0;
         } else {
             latestReleaseTag_.clear();
@@ -2165,6 +2219,69 @@ void AppBarWindow::OnLatestReleaseChecked(ReleaseVersionInfo* info) {
     }
 
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void AppBarWindow::RequestLocalUsageRefresh(bool force) {
+    bool expected = false;
+    if (!force && !localUsageInFlight_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    if (force && localUsageInFlight_.exchange(true)) {
+        return;
+    }
+
+    RenderLayeredSurface();
+    const HWND target = hwnd_;
+    if (localUsageWorker_.joinable()) {
+        localUsageWorker_.join();
+    }
+    localUsageWorker_ = std::jthread([this, target](std::stop_token stopToken) {
+        codex_usage::LocalUsageSnapshot result = localUsageCollector_.Refresh(stopToken);
+        if (stopToken.stop_requested() || shuttingDown_) {
+            return;
+        }
+        {
+            std::lock_guard lock(backgroundResultMutex_);
+            pendingLocalUsageResult_ = std::move(result);
+        }
+        if (!shuttingDown_) {
+            PostMessageW(target, kLocalUsageUpdatedMessage, 0, 0);
+        }
+    });
+}
+
+void AppBarWindow::OnLocalUsageUpdated() {
+    if (localUsageWorker_.joinable()) {
+        localUsageWorker_.join();
+    }
+    std::optional<codex_usage::LocalUsageSnapshot> result;
+    {
+        std::lock_guard lock(backgroundResultMutex_);
+        result = std::move(pendingLocalUsageResult_);
+        pendingLocalUsageResult_.reset();
+    }
+    localUsageInFlight_ = false;
+    if (result.has_value()) {
+        localUsageSnapshot_ = std::move(*result);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    RenderLayeredSurface();
+}
+
+void AppBarWindow::StopBackgroundWorkers() {
+    shuttingDown_ = true;
+    usageWorker_.request_stop();
+    releaseWorker_.request_stop();
+    localUsageWorker_.request_stop();
+    if (usageWorker_.joinable()) {
+        usageWorker_.join();
+    }
+    if (releaseWorker_.joinable()) {
+        releaseWorker_.join();
+    }
+    if (localUsageWorker_.joinable()) {
+        localUsageWorker_.join();
+    }
 }
 
 std::wstring AppBarWindow::BuildResetCreditsSummaryText() const {
@@ -2219,6 +2336,22 @@ bool AppBarWindow::TryHandleControlClick(POINT clientPoint) {
         return true;
     }
 
+    if (!simpleMode_ && !taskbarMode_) {
+        const bool quotaClicked = quotaTabRect_.right > quotaTabRect_.left
+            && PtInRect(&quotaTabRect_, clientPoint);
+        const bool activityClicked = activityTabRect_.right > activityTabRect_.left
+            && PtInRect(&activityTabRect_, clientPoint);
+        const codex_widget::FullPage nextPage = codex_widget::FullPageAfterTabClick(
+            fullPage_, quotaClicked, activityClicked);
+        if (nextPage != fullPage_) {
+            fullPage_ = nextPage;
+            UpdateWindowBounds(true);
+            SaveSettings();
+            RenderLayeredSurface();
+            return true;
+        }
+    }
+
     return TryHandleRefreshButtonClick(clientPoint);
 }
 
@@ -2229,6 +2362,7 @@ bool AppBarWindow::TryHandleRefreshButtonClick(POINT clientPoint) {
 
     if (refreshButtonRect_.right > refreshButtonRect_.left && PtInRect(&refreshButtonRect_, clientPoint)) {
         RequestRefresh(true);
+        RequestLocalUsageRefresh(true);
         return true;
     }
     return false;
@@ -2268,6 +2402,8 @@ void AppBarWindow::Paint(HDC hdc) {
 
 void AppBarWindow::PaintContent(const RECT& clientRect) {
     refreshButtonRect_ = {};
+    quotaTabRect_ = {};
+    activityTabRect_ = {};
     const PaceInfo pace = BuildPaceInfo(snapshot_);
     const int padX = ScaleForDpi(hwnd_, kHorizontalPadding);
     const int padY = ScaleForDpi(hwnd_, kVerticalPadding);
@@ -2820,10 +2956,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         drawTextBlock(textFormatMetricLabel_.Get(), statusText, statusRect, statusColor,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
+        const int localBandHeight = ScaleForDpi(hwnd_, 20);
         const int resetBandHeight = ScaleForDpi(hwnd_, 18);
         RECT cardsRect = MakeRect(clientRect.left + innerPad, clientRect.top + topBandHeight + ScaleForDpi(hwnd_, 2),
             panelRect.right - innerPad,
-            clientRect.bottom - footerHeight - resetBandHeight - ScaleForDpi(hwnd_, 6));
+            clientRect.bottom - footerHeight - localBandHeight - resetBandHeight - ScaleForDpi(hwnd_, 6));
         const int cardWidth = (RectWidth(cardsRect) - cardGap) / 2;
         RECT dayRect = MakeRect(cardsRect.left, cardsRect.top, cardsRect.left + cardWidth, cardsRect.bottom);
         RECT weekRect = MakeRect(dayRect.right + cardGap, cardsRect.top, cardsRect.right, cardsRect.bottom);
@@ -2847,8 +2984,23 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
         const std::wstring resetSummary = BuildResetCreditsSummaryText();
         const std::wstring resetExpiry = BuildResetCreditsExpiryText();
-        RECT resetSummaryRect = MakeRect(clientRect.left + innerPad, cardsRect.bottom + ScaleForDpi(hwnd_, 2),
-            panelRect.right - innerPad, cardsRect.bottom + resetBandHeight);
+        const std::wstring localSummary = localUsageSnapshot_.available
+            ? (std::wstring(LocalizeText(L"Today ", L"今日 "))
+                + codex_usage::FormatCompactCount(localUsageSnapshot_.today.totalTokens)
+                + LocalizeText(L" tokens · ", L" Token · ")
+                + codex_usage::FormatCompactCount(localUsageSnapshot_.todayTaskCount)
+                + LocalizeText(L" tasks", L" 個任務"))
+            : (localUsageInFlight_
+                ? std::wstring(LocalizeText(L"Building local statistics", L"正在建立本機統計"))
+                : std::wstring(LocalizeText(L"Local statistics unavailable", L"本機統計無法取得")));
+        RECT localSummaryRect = MakeRect(clientRect.left + innerPad, cardsRect.bottom + ScaleForDpi(hwnd_, 1),
+            panelRect.right - innerPad, cardsRect.bottom + localBandHeight);
+        drawTextBlock(textFormatFoot_.Get(), localSummary, localSummaryRect,
+            localUsageInFlight_ ? heroValue : textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_WORD_WRAPPING_NO_WRAP, true);
+        RECT resetSummaryRect = MakeRect(clientRect.left + innerPad, localSummaryRect.bottom,
+            panelRect.right - innerPad, localSummaryRect.bottom + resetBandHeight);
         drawTextBlock(textFormatFoot_.Get(), resetSummary + L" · " + resetExpiry, resetSummaryRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
 
@@ -2932,6 +3084,275 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             headerRect.bottom);
         drawOpaqueTextLine(textFormatFoot_.Get(), planLine, planRect, textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
         y = headerRect.bottom + cardGap;
+
+        const int tabHeight = ScaleForDpi(hwnd_, 28);
+        const int tabGap = ScaleForDpi(hwnd_, 8);
+        const int tabWidth = (RectWidth(headerRect) - tabGap) / 2;
+        quotaTabRect_ = MakeRect(headerRect.left, y, headerRect.left + tabWidth, y + tabHeight);
+        activityTabRect_ = MakeRect(quotaTabRect_.right + tabGap, y, headerRect.right, y + tabHeight);
+        drawOpaqueRounded(
+            quotaTabRect_,
+            fullPage_ == codex_widget::FullPage::Quota ? cardBlue : cardNeutral,
+            fullPage_ == codex_widget::FullPage::Quota ? 0.94f : 0.58f);
+        drawOpaqueRounded(
+            activityTabRect_,
+            fullPage_ == codex_widget::FullPage::Activity ? cardBlue : cardNeutral,
+            fullPage_ == codex_widget::FullPage::Activity ? 0.94f : 0.58f);
+        drawOpaqueTextLine(
+            textFormatMetricLabel_.Get(), LocalizeText(L"Quota", L"配額"), quotaTabRect_,
+            fullPage_ == codex_widget::FullPage::Quota ? textPrimary : textSecondary,
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+        drawOpaqueTextLine(
+            textFormatMetricLabel_.Get(), LocalizeText(L"Activity", L"活動"), activityTabRect_,
+            fullPage_ == codex_widget::FullPage::Activity ? textPrimary : textSecondary,
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+        y = activityTabRect_.bottom + cardGap;
+
+        if (fullPage_ == codex_widget::FullPage::Activity) {
+            const bool localAvailable = localUsageSnapshot_.available;
+            const auto localValue = [&](std::uint64_t value) {
+                return localAvailable ? codex_usage::FormatCompactCount(value) : std::wstring(L"--");
+            };
+            const std::wstring metricTitles[] = {
+                LocalizeText(L"Today tokens", L"今日 Token"),
+                LocalizeText(L"Local tokens", L"本機累計 Token"),
+                LocalizeText(L"Today tasks", L"今日任務"),
+                LocalizeText(L"Local tasks", L"本機任務"),
+                LocalizeText(L"Today turns", L"今日回合"),
+                LocalizeText(L"Local turns", L"本機回合"),
+            };
+            const std::wstring metricValues[] = {
+                localValue(localUsageSnapshot_.today.totalTokens),
+                localValue(localUsageSnapshot_.recordedTotal.totalTokens),
+                localValue(localUsageSnapshot_.todayTaskCount),
+                localValue(localUsageSnapshot_.recordedTaskCount),
+                localValue(localUsageSnapshot_.todayTurnCount),
+                localValue(localUsageSnapshot_.recordedTurnCount),
+            };
+
+            const int summaryGap = ScaleForDpi(hwnd_, 8);
+            const int summaryHeight = ScaleForDpi(hwnd_, 66);
+            const int summaryWidth = (RectWidth(headerRect) - summaryGap * 2) / 3;
+            for (int index = 0; index < 6; ++index) {
+                const int row = index / 3;
+                const int column = index % 3;
+                const int left = headerRect.left + column * (summaryWidth + summaryGap);
+                const RECT card = MakeRect(
+                    left,
+                    y + row * (summaryHeight + summaryGap),
+                    column == 2 ? headerRect.right : left + summaryWidth,
+                    y + row * (summaryHeight + summaryGap) + summaryHeight);
+                fillCard(card, index % 2 == 0 ? cardBlue : cardLavender);
+                drawOpaqueTextLine(
+                    textFormatFoot_.Get(), metricTitles[index],
+                    MakeRect(card.left + ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 5),
+                        card.right - ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 23)),
+                    textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+                drawOpaqueTextLine(
+                    textFormatMetricValue_.Get(), metricValues[index],
+                    MakeRect(card.left + ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 23),
+                        card.right - ScaleForDpi(hwnd_, 9), card.bottom - ScaleForDpi(hwnd_, 5)),
+                    textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
+            y += summaryHeight * 2 + summaryGap + cardGap;
+
+            const int breakdownHeight = ScaleForDpi(hwnd_, 92);
+            const RECT breakdownCard = MakeRect(headerRect.left, y, headerRect.right, y + breakdownHeight);
+            fillCard(breakdownCard, cardNeutral);
+            drawOpaqueTextLine(
+                textFormatMetricLabel_.Get(), LocalizeText(L"Token breakdown · today / local", L"Token 分類 · 今日／本機累計"),
+                MakeRect(breakdownCard.left + ScaleForDpi(hwnd_, 12), breakdownCard.top + ScaleForDpi(hwnd_, 4),
+                    breakdownCard.right - ScaleForDpi(hwnd_, 12), breakdownCard.top + ScaleForDpi(hwnd_, 25)),
+                textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            const std::wstring breakdownTitles[] = {
+                LocalizeText(L"Input", L"輸入"),
+                LocalizeText(L"Output", L"輸出"),
+                LocalizeText(L"Cached", L"快取輸入"),
+                LocalizeText(L"Cache write", L"快取寫入"),
+                LocalizeText(L"Reasoning", L"推理輸出"),
+            };
+            const std::uint64_t todayBreakdown[] = {
+                localUsageSnapshot_.today.inputTokens,
+                localUsageSnapshot_.today.outputTokens,
+                localUsageSnapshot_.today.cachedInputTokens,
+                localUsageSnapshot_.today.cacheWriteInputTokens,
+                localUsageSnapshot_.today.reasoningOutputTokens,
+            };
+            const std::uint64_t totalBreakdown[] = {
+                localUsageSnapshot_.recordedTotal.inputTokens,
+                localUsageSnapshot_.recordedTotal.outputTokens,
+                localUsageSnapshot_.recordedTotal.cachedInputTokens,
+                localUsageSnapshot_.recordedTotal.cacheWriteInputTokens,
+                localUsageSnapshot_.recordedTotal.reasoningOutputTokens,
+            };
+            const int breakdownLeft = breakdownCard.left + ScaleForDpi(hwnd_, 10);
+            const int breakdownWidth = RectWidth(breakdownCard) - ScaleForDpi(hwnd_, 20);
+            for (int index = 0; index < 5; ++index) {
+                const int left = breakdownLeft + breakdownWidth * index / 5;
+                const int right = breakdownLeft + breakdownWidth * (index + 1) / 5;
+                drawOpaqueTextLine(
+                    textFormatFoot_.Get(), breakdownTitles[index],
+                    MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 27), right,
+                        breakdownCard.top + ScaleForDpi(hwnd_, 46)),
+                    textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+                const std::wstring value = localAvailable
+                    ? (codex_usage::FormatCompactCount(todayBreakdown[index]) + L" / "
+                        + codex_usage::FormatCompactCount(totalBreakdown[index]))
+                    : L"--";
+                drawOpaqueTextLine(
+                    textFormatFoot_.Get(), value,
+                    MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 47), right,
+                        breakdownCard.bottom - ScaleForDpi(hwnd_, 5)),
+                    textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            y = breakdownCard.bottom + cardGap;
+
+            const int accountHeight = ScaleForDpi(hwnd_, 72);
+            const RECT accountCard = MakeRect(headerRect.left, y, headerRect.right, y + accountHeight);
+            fillCard(accountCard, cardLavender);
+            std::wstring accessText = LocalizeText(L"Access: --", L"使用狀態：--");
+            if (snapshot_.endpointStatus.hasAllowed) {
+                accessText = snapshot_.endpointStatus.allowed
+                    ? LocalizeText(L"Access: allowed", L"使用狀態：允許")
+                    : LocalizeText(L"Access: limited", L"使用狀態：受限");
+            } else if (snapshot_.endpointStatus.hasLimitReached) {
+                accessText = snapshot_.endpointStatus.limitReached
+                    ? LocalizeText(L"Access: limit reached", L"使用狀態：已達限制")
+                    : LocalizeText(L"Access: available", L"使用狀態：可用");
+            }
+            if (!snapshot_.endpointStatus.rateLimitReachedType.empty()) {
+                accessText += L" · " + snapshot_.endpointStatus.rateLimitReachedType;
+            }
+            std::wstring creditsText = LocalizeText(L"Credits: --", L"Credits：--");
+            if (snapshot_.credits.hasUnlimited && snapshot_.credits.unlimited) {
+                creditsText = LocalizeText(L"Credits: unlimited", L"Credits：無限制");
+            } else if (snapshot_.credits.hasBalance) {
+                creditsText = std::wstring(LocalizeText(L"Credits balance: ", L"Credits 餘額："))
+                    + FormatNumberNoUnit(snapshot_.credits.balance);
+            } else if (snapshot_.credits.hasCredits) {
+                creditsText = snapshot_.credits.creditsEnabled
+                    ? LocalizeText(L"Credits: enabled", L"Credits：可用")
+                    : LocalizeText(L"Credits: none", L"Credits：無");
+            }
+            if (snapshot_.credits.hasApproxLocalMessages) {
+                creditsText += std::wstring(LocalizeText(L" · Local msg ", L" · 本機訊息 "))
+                    + std::to_wstring(snapshot_.credits.approxLocalMessagesMin) + L"–"
+                    + std::to_wstring(snapshot_.credits.approxLocalMessagesMax);
+            }
+            if (snapshot_.credits.hasApproxCloudMessages) {
+                creditsText += std::wstring(LocalizeText(L" · Cloud ", L" · 雲端 "))
+                    + std::to_wstring(snapshot_.credits.approxCloudMessagesMin) + L"–"
+                    + std::to_wstring(snapshot_.credits.approxCloudMessagesMax);
+            }
+            std::wstring controlsText = snapshot_.spendControl.hasReached
+                ? (snapshot_.spendControl.reached
+                    ? std::wstring(LocalizeText(L"Spend control: reached", L"支出限制：已達"))
+                    : std::wstring(LocalizeText(L"Spend control: OK", L"支出限制：正常")))
+                : std::wstring(LocalizeText(L"Spend control: --", L"支出限制：--"));
+            if (snapshot_.hasApplicableResetCredits) {
+                controlsText += std::wstring(LocalizeText(L" · Applicable resets ", L" · 適用重設卡 "))
+                    + std::to_wstring(snapshot_.applicableResetCredits);
+            }
+            drawOpaqueTextLine(textFormatFoot_.Get(), accessText,
+                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 3),
+                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 25)),
+                textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(textFormatFoot_.Get(), creditsText,
+                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 25),
+                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 48)),
+                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(textFormatFoot_.Get(), controlsText,
+                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 48),
+                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.bottom - ScaleForDpi(hwnd_, 2)),
+                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            y = accountCard.bottom + cardGap;
+
+            const int statusBottom = static_cast<int>(panelRect.bottom) - ScaleForDpi(hwnd_, 58);
+            const int statusHeight = std::max(ScaleForDpi(hwnd_, 84), statusBottom - y);
+            const RECT statusCard = MakeRect(
+                headerRect.left, y, headerRect.right,
+                std::min(statusBottom, y + statusHeight));
+            fillCard(statusCard, cardNeutral);
+            const std::wstring stateText = localUsageInFlight_
+                ? (localAvailable
+                    ? LocalizeText(L"Refreshing", L"更新中")
+                    : LocalizeText(L"Indexing", L"建立索引中"))
+                : (!localAvailable
+                    ? LocalizeText(L"Unavailable", L"無法取得")
+                    : (localUsageSnapshot_.partial
+                        ? LocalizeText(L"Partial", L"部分完成")
+                        : LocalizeText(L"Ready", L"就緒")));
+            const std::wstring coverageText = localAvailable
+                ? (std::wstring(LocalizeText(L"Coverage ", L"紀錄起始 "))
+                    + (localUsageSnapshot_.coverageStartUnixSeconds > 0
+                        ? FormatFullDateTime(localUsageSnapshot_.coverageStartUnixSeconds)
+                        : L"--")
+                    + std::wstring(LocalizeText(L" · Last event ", L" · 最後事件 "))
+                    + (localUsageSnapshot_.lastEventUnixSeconds > 0
+                        ? FormatFullDateTime(localUsageSnapshot_.lastEventUnixSeconds)
+                        : L"--"))
+                : localUsageSnapshot_.errorMessage;
+            const std::wstring scanText = localAvailable
+                ? (std::wstring(LocalizeText(L"Last scan ", L"最後掃描 "))
+                    + FormatFullDateTime(localUsageSnapshot_.lastScanUnixSeconds)
+                    + std::wstring(LocalizeText(L" · Files ", L" · 檔案 "))
+                    + std::to_wstring(localUsageSnapshot_.filesDiscovered)
+                    + std::wstring(LocalizeText(L" · This pass ", L" · 本輪讀取 "))
+                    + codex_usage::FormatCompactCount(localUsageSnapshot_.bytesReadThisScan) + L"B")
+                : std::wstring(LocalizeText(L"Local session data was not available", L"無法取得本機 session 資料"));
+            drawOpaqueTextLine(textFormatMetricLabel_.Get(),
+                std::wstring(LocalizeText(L"Local index · ", L"本機索引 · ")) + stateText,
+                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 3),
+                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 27)),
+                localUsageSnapshot_.partial ? RGB(233, 180, 91) : textPrimary,
+                DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(textFormatFoot_.Get(), coverageText,
+                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 27),
+                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 51)),
+                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(textFormatFoot_.Get(), scanText,
+                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 51),
+                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.bottom - ScaleForDpi(hwnd_, 3)),
+                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+
+            const int refreshSize = ScaleForDpi(hwnd_, 34);
+            refreshButtonRect_ = MakeRect(
+                panelRect.right - fullPad - refreshSize,
+                panelRect.bottom - ScaleForDpi(hwnd_, 46),
+                panelRect.right - fullPad,
+                panelRect.bottom - ScaleForDpi(hwnd_, 12));
+            const bool anyRefreshInFlight = refreshInFlight_ || localUsageInFlight_;
+            if (anyRefreshInFlight) {
+                fillEllipse(
+                    D2D1::Ellipse(
+                        D2D1::Point2F(
+                            static_cast<float>(refreshButtonRect_.left + RectWidth(refreshButtonRect_) / 2),
+                            static_cast<float>(refreshButtonRect_.top + RectHeight(refreshButtonRect_) / 2)),
+                        static_cast<float>(refreshSize) * 0.48f,
+                        static_cast<float>(refreshSize) * 0.48f),
+                    heroValue, 0.14f);
+            }
+            if (undoIconBitmap_) {
+                DrawAssetBitmap(undoIconBitmap_.Get(), refreshButtonRect_, 1.0f);
+            }
+            const RECT footerLeftRect = MakeRect(
+                panelRect.left + fullPad, panelRect.bottom - ScaleForDpi(hwnd_, 46),
+                panelRect.left + RectWidth(panelRect) / 2, panelRect.bottom - ScaleForDpi(hwnd_, 12));
+            const RECT footerRightRect = MakeRect(
+                panelRect.left + RectWidth(panelRect) / 2, panelRect.bottom - ScaleForDpi(hwnd_, 46),
+                refreshButtonRect_.left - ScaleForDpi(hwnd_, 10), panelRect.bottom - ScaleForDpi(hwnd_, 12));
+            drawOpaqueTextLine(textFormatFoot_.Get(), GetVersionStatusText(true), footerLeftRect,
+                updateAvailable_ ? heroValue : textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(
+                textFormatFoot_.Get(),
+                anyRefreshInFlight
+                    ? LocalizeText(L"Refreshing remote + local", L"正在更新遠端與本機資料")
+                    : (GetRefreshStatusText() + std::wstring(LocalizeText(L" · Local 15s", L" · 本機 15 秒"))),
+                footerRightRect,
+                anyRefreshInFlight ? heroValue : textSecondary,
+                DWRITE_TEXT_ALIGNMENT_TRAILING);
+            return;
+        }
 
         auto drawSummaryCard = [&](const RECT& cardRect,
                                    const std::wstring& title,
@@ -3597,6 +4018,7 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
 
     if (command == kCommandRefresh) {
         RequestRefresh(true);
+        RequestLocalUsageRefresh(true);
     } else if (command == kCommandCheckVersion) {
         RequestLatestReleaseCheck(true);
     } else if (command == kCommandRefreshInterval1Minute) {
