@@ -154,6 +154,7 @@ private:
     std::wstring FormatDateTime(long long unixSeconds) const;
     std::wstring FormatFullDateTime(long long unixSeconds) const;
     std::wstring FormatClockTime(long long unixSeconds) const;
+    std::wstring FormatCompactDateTime(long long unixSeconds) const;
     std::wstring FormatPercent(double value) const;
     std::wstring FormatPlanDisplayName() const;
     // remainingPercent: 100 = healthy green, 0 = critical red (soft, not pure).

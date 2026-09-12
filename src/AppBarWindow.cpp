@@ -3366,7 +3366,6 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             if (!window.available) {
                 resetStatusText = LocalizeText(L"Unavailable", L"目前無法取得");
             } else {
-                const std::wstring resetClock = FormatDateTime(window.resetAtUnixSeconds);
                 const bool resetHasStarted = window.resetAfterSeconds > 0;
                 const bool resetIsInFuture = window.resetAtUnixSeconds > static_cast<long long>(std::time(nullptr));
                 if (resetHasStarted) {
@@ -3377,7 +3376,16 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                 } else {
                     resetStatusText = LocalizeText(L"Reset", L"重設");
                 }
-                resetTimeText = std::wstring(LocalizeText(L"Expires ", L"到期時間 ")) + resetClock;
+                const bool isShortWindow = window.windowSeconds > 0 && window.windowSeconds <= (5 * 60 * 60);
+                if (isShortWindow) {
+                    const std::wstring dateTime = FormatDateTime(window.resetAtUnixSeconds);
+                    const size_t separator = dateTime.find(L' ');
+                    resetTimeText = L"(" + (separator == std::wstring::npos
+                        ? dateTime
+                        : dateTime.substr(separator + 1)) + L")";
+                } else {
+                    resetTimeText = L"(" + FormatCompactDateTime(window.resetAtUnixSeconds) + L")";
+                }
             }
             drawOpaqueTextLine(
                 textFormatFoot_.Get(),
@@ -3391,7 +3399,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                 resetTimeText,
                 MakeRect(cardRect.left + inner, cardRect.bottom - ScaleForDpi(hwnd_, 30),
                     cardRect.right - inner, cardRect.bottom - ScaleForDpi(hwnd_, 16)),
-                textPrimary,
+                textSecondary,
                 DWRITE_TEXT_ALIGNMENT_LEADING);
             const RECT track = MakeRect(
                 cardRect.left + inner,
@@ -4160,6 +4168,26 @@ std::wstring AppBarWindow::FormatClockTime(long long unixSeconds) const {
 
     wchar_t buffer[64] = {};
     wcsftime(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%H:%M:%S", &localTime);
+    return buffer;
+}
+
+std::wstring AppBarWindow::FormatCompactDateTime(long long unixSeconds) const {
+    if (unixSeconds <= 0) {
+        return L"--";
+    }
+
+    std::time_t t = static_cast<std::time_t>(unixSeconds);
+    std::tm localTime = {};
+    localtime_s(&localTime, &t);
+
+    wchar_t buffer[64] = {};
+    swprintf_s(
+        buffer,
+        L"%d/%d %02d:%02d",
+        localTime.tm_mon + 1,
+        localTime.tm_mday,
+        localTime.tm_hour,
+        localTime.tm_min);
     return buffer;
 }
 
