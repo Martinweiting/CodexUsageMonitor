@@ -39,6 +39,8 @@ add_executable(CodexUsageMonitor WIN32
     src/JsonLite.cpp
     src/LocalUsageStats.cpp
     src/WidgetPresentation.cpp
+    src/ActivityAnalytics.cpp
+    src/ActivityDetailsWindow.cpp
 )
 
 target_include_directories(CodexUsageMonitor PRIVATE src)
@@ -73,6 +75,10 @@ target_link_libraries(CodexUsageMonitor PRIVATE
     user32
     winhttp
     windowscodecs
+    comctl32
+    comdlg32
+    oleacc
+    uxtheme
 )
 
 add_custom_command(TARGET CodexUsageMonitor POST_BUILD
@@ -100,4 +106,27 @@ if(CODEX_USAGE_MONITOR_BUILD_TESTS)
         winhttp
     )
     add_test(NAME WidgetPresentationTests COMMAND CodexUsageMonitorTests)
+    add_executable(ActivityAnalyticsTests tests/ActivityAnalyticsTests.cpp src/ActivityAnalytics.cpp src/LocalUsageStats.cpp src/JsonLite.cpp)
+    target_include_directories(ActivityAnalyticsTests PRIVATE src)
+    target_compile_definitions(ActivityAnalyticsTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(ActivityAnalyticsTests PRIVATE /utf-8 /UNDEBUG)
+    target_link_libraries(ActivityAnalyticsTests PRIVATE shell32 ole32 advapi32)
+    add_test(NAME ActivityAnalyticsTests COMMAND ActivityAnalyticsTests)
+    add_executable(WindowInteractionTests
+        tests/WindowInteractionTests.cpp
+        src/AppBarWindow.cpp
+        src/CodexUsageFetcher.cpp
+        src/JsonLite.cpp
+        src/LocalUsageStats.cpp
+        src/WidgetPresentation.cpp
+        src/ActivityAnalytics.cpp
+        src/ActivityDetailsWindow.cpp
+    )
+    target_include_directories(WindowInteractionTests PRIVATE src)
+    target_compile_definitions(WindowInteractionTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN APP_VERSION_W=L\"test\")
+    target_compile_options(WindowInteractionTests PRIVATE /utf-8 /UNDEBUG)
+    target_link_libraries(WindowInteractionTests PRIVATE
+        advapi32 crypt32 d2d1 dwrite dwmapi gdi32 ole32 shell32 shlwapi user32 winhttp windowscodecs comctl32 comdlg32 oleacc uxtheme)
+    add_test(NAME WindowInteractionTests COMMAND WindowInteractionTests)
 endif()

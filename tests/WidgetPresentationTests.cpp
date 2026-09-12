@@ -76,6 +76,75 @@ std::string TokenLine(
     return line.str();
 }
 
+void VerifyExactTokenCounters() {
+    TemporaryDirectory temporary;
+    const auto home = temporary.path / L"home";
+    const auto source = home / L"sessions" / L"exact.jsonl";
+    std::string fixture = R"({"timestamp":"2026-09-08T00:00:00Z","type":"session_meta","payload":{"id":"exact","thread_source":"user"}})" "\n";
+    fixture += TokenLine("2026-09-08T00:00:01Z", 100, 50, 0, 0, 0, 9007199254740993ULL) + "\n";
+    fixture += R"({"timestamp":"2026-09-08T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"total_tokens":9007199254740994}}}})" "\n";
+    fixture += TokenLine("2026-09-08T00:00:03Z", 120, 60, 0, 0, 0, 9007199254740995ULL) + "\n";
+    WriteText(source, fixture);
+    codex_usage::LocalUsageStatsCollector collector({home, temporary.path / L"cache.tsv"});
+    const auto snapshot = collector.Refresh({}, 1788836400, 1788825600);
+    assert(snapshot.recordedTotal.totalTokens == 9007199254740995ULL);
+    assert(snapshot.recordedTotal.cachedInputTokens == 60);
+    assert(snapshot.activity->resets == 0);
+    assert(snapshot.activity->events[1].tokens.totalTokens == 1);
+    assert((snapshot.activity->events[1].validFields & 2) == 0);
+    assert(snapshot.activity->events[2].tokens.cachedInputTokens == 10);
+}
+
+void VerifyActivityMetadata() {
+    TemporaryDirectory temporary;
+    const auto home = temporary.path / L"home";
+    const auto source = home / L"sessions" / L"metadata.jsonl";
+    const auto cache = temporary.path / L"cache.tsv";
+    std::string fixture = R"({"timestamp":"2026-09-08T00:00:00Z","type":"session_meta","payload":{"id":"metadata","thread_source":"user","originator":"codex_cli_rs"}})" "\n";
+    fixture += R"({"timestamp":"2026-09-08T00:00:01Z","type":"turn_context","payload":{"model":"model-a","cwd":"SECRET_PROJECT_PATH","turn_id":"turn-a"}})" "\n";
+    fixture += TokenLine("2026-09-08T00:00:02Z", 10, 0, 0, 0, 0, 10) + "\n";
+    fixture += TokenLine("2026-09-08T00:00:03Z", 20, 0, 0, 0, 0, 20) + "\n";
+    fixture += R"({"timestamp":"2026-09-08T00:00:04Z","type":"turn_context","payload":{"model":"model-b","cwd":"SECRET_PROJECT_PATH"}})" "\n";
+    fixture += TokenLine("2026-09-08T00:00:05Z", 30, 0, 0, 0, 0, 30) + "\n";
+    fixture += TokenLine("2026-09-08T00:00:06Z", 40, 0, 0, 0, 0, 40) + "\n";
+    fixture += R"({"timestamp":"2026-09-08T00:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","duration_ms":1200,"error":null,"last_agent_message":"SECRET_RESPONSE"}})" "\n";
+    fixture += R"({"timestamp":"2026-09-08T00:00:08Z","type":"turn_context","payload":{}})" "\n";
+    fixture += TokenLine("2026-09-08T00:00:09Z", 50, 0, 0, 0, 0, 50) + "\n";
+    WriteText(source, fixture);
+    codex_usage::LocalUsageStatsCollector collector({home, cache});
+    const auto first = collector.Refresh({}, 1788836400, 1788825600);
+    assert(first.activity && first.activity->events.size() == 5);
+    assert(first.activity->events[0].model.empty());
+    assert(first.activity->events[1].model == "model-a");
+    assert(first.activity->events[2].model.empty());
+    assert(first.activity->events[3].model == "model-b");
+    assert(first.activity->events[4].model.empty());
+    assert(first.activity->completedTurns.size() == 1);
+    assert(first.activity->completedTurns[0].durationMilliseconds == 1200);
+    assert(first.activity->sessions[0].client == "codex_cli_rs");
+    const auto saved = ReadText(cache);
+    assert(saved.find("SECRET_") == std::string::npos);
+    codex_usage::LocalUsageStatsCollector loaded({home, cache});
+    const auto unchanged = loaded.Refresh({}, 1788836400, 1788825600);
+    assert(unchanged.bytesReadThisScan == 0);
+    assert(unchanged.activity->events[1].model == "model-a");
+    assert(unchanged.activity->completedTurns.size() == 1);
+    loaded.RequestRebuild();
+    std::stop_source cancel;
+    cancel.request_stop();
+    assert(loaded.Refresh(cancel.get_token(), 1788836400, 1788825600).recordedTotal.totalTokens == 50);
+    assert(ReadText(cache) == saved);
+    // Same-sized replacement must invalidate its checkpoint, even without truncation.
+    auto replacement = fixture;
+    const auto at = replacement.find("model-a");
+    replacement.replace(at, 7, "model-c");
+    WriteText(source, replacement);
+    std::filesystem::last_write_time(source, std::filesystem::last_write_time(source) + std::chrono::seconds(2));
+    codex_usage::LocalUsageStatsCollector replaced({home, cache});
+    const auto changed = replaced.Refresh({}, 1788836400, 1788825600);
+    assert(changed.rebuilt && changed.activity->events[1].model == "model-c");
+}
+
 void VerifyLocalUsageIncrementalIndex() {
     TemporaryDirectory temporary;
     const std::filesystem::path codexHome = temporary.path / L"codex-home";
@@ -500,6 +569,8 @@ int main(int argc, char** argv) {
     assert(!invalidPayload.success);
 
     VerifyLocalUsageIncrementalIndex();
+    VerifyActivityMetadata();
+    VerifyExactTokenCounters();
 
     std::cout << "WidgetPresentationTests passed\n";
     return 0;

@@ -1,4 +1,4 @@
-﻿#include "AppBarWindow.h"
+#include "AppBarWindow.h"
 #include "AppVersion.h"
 
 #include <ShlObj.h>
@@ -450,6 +450,7 @@ bool AppBarWindow::Create() {
 int AppBarWindow::Run() {
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (activityWindow_ && activityWindow_->Translate(message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -663,18 +664,14 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_CAPTURECHANGED:
-            if (settingsDragging_) {
-                settingsDragging_ = false;
-                return 0;
-            }
-            if (dragMode_ != DragMode::None) {
-                const bool activateBubble = bubbleClickPending_ && !dragMoved_;
-                EndDrag(!bubbleClickPending_ || dragMoved_);
-                bubbleClickPending_ = false;
-                dragMoved_ = false;
-                if (activateBubble) {
-                    ActivateBubbleClick();
-                }
+        case WM_CANCELMODE:
+            // Losing capture cancels a gesture; it is never a button release.
+            settingsDragging_ = false;
+            dragMode_ = DragMode::None;
+            bubbleClickPending_ = false;
+            dragMoved_ = false;
+            if (GetCapture() == hwnd_) {
+                ReleaseCapture();
             }
             return 0;
 
@@ -706,6 +703,7 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_DESTROY:
+            activityWindow_.reset();
             KillTimer(hwnd_, kCountdownTimerId);
             KillTimer(hwnd_, kRefreshTimerId);
             KillTimer(hwnd_, kHoverPollTimerId);
@@ -1152,6 +1150,13 @@ void AppBarWindow::ArmMouseLeaveTracking() {
         return;
     }
 
+    // Geometric containment alone is insufficient when another window covers
+    // us. Rearming outside this HWND immediately posts another WM_MOUSELEAVE.
+    POINT cursor = {};
+    if (!GetCursorPos(&cursor) || WindowFromPoint(cursor) != hwnd_) {
+        return;
+    }
+
     TRACKMOUSEEVENT track = {};
     track.cbSize = sizeof(track);
     track.dwFlags = TME_LEAVE;
@@ -1180,7 +1185,7 @@ bool AppBarWindow::IsCursorInsideCurrentWindow() const {
 }
 
 void AppBarWindow::UpdateHoverStateFromCursor() {
-    if (hwnd_ == nullptr || taskbarMode_ || settingsOpen_ || settingsDragging_ || dragMode_ != DragMode::None) {
+    if (hwnd_ == nullptr || taskbarMode_ || settingsOpen_ || settingsDragging_ || contextMenuOpen_ || dragMode_ != DragMode::None) {
         return;
     }
 
@@ -1196,7 +1201,8 @@ void AppBarWindow::UpdateHoverStateFromCursor() {
             && cursorScreen.y >= rect.top
             && cursorScreen.y < rect.bottom;
     };
-    const bool cursorInsideBubble = contains(group.bubble);
+    const bool cursorInsideBubble = contains(group.bubble)
+        && WindowFromPoint(cursorScreen) == hwnd_;
     const bool cursorInsideVisibleGroup = codex_widget::IsPointInsideWidgetGroup(
         group, cursorScreen.x, cursorScreen.y)
         || (cursorScreen.x >= group.panel.right
@@ -1221,8 +1227,6 @@ void AppBarWindow::UpdateHoverStateFromCursor() {
         cursorInsideVisibleGroup);
     if (nextState != presentationState_) {
         SetPresentationState(nextState);
-    } else if (cursorInsideVisibleGroup) {
-        ArmMouseLeaveTracking();
     }
 }
 
@@ -2313,6 +2317,7 @@ void AppBarWindow::RequestLocalUsageRefresh(bool force) {
         return;
     }
     if (force && localUsageInFlight_.exchange(true)) {
+        pendingLocalRefresh_ = true;
         return;
     }
 
@@ -2321,14 +2326,21 @@ void AppBarWindow::RequestLocalUsageRefresh(bool force) {
     if (localUsageWorker_.joinable()) {
         localUsageWorker_.join();
     }
-    localUsageWorker_ = std::jthread([this, target](std::stop_token stopToken) {
+    if (pendingLocalRebuild_) { localUsageCollector_.RequestRebuild(); pendingLocalRebuild_ = false; }
+    const auto overviewPeriod = activityPeriod_;
+    localUsageWorker_ = std::jthread([this, target, overviewPeriod](std::stop_token stopToken) {
         codex_usage::LocalUsageSnapshot result = localUsageCollector_.Refresh(stopToken);
-        if (stopToken.stop_requested() || shuttingDown_) {
+        if (shuttingDown_) {
             return;
         }
+        activity::Query overviewQuery; overviewQuery.period = overviewPeriod;
+        auto overview = activity::Analyze(result, overviewQuery, stopToken);
+        activity::Query previewQuery; previewQuery.period = activity::Period::SevenDays;
+        auto preview = activity::Analyze(result, previewQuery, stopToken);
         {
             std::lock_guard lock(backgroundResultMutex_);
             pendingLocalUsageResult_ = std::move(result);
+            pendingActivityOverview_ = std::make_pair(std::move(overview), std::move(preview));
         }
         if (!shuttingDown_) {
             PostMessageW(target, kLocalUsageUpdatedMessage, 0, 0);
@@ -2345,10 +2357,21 @@ void AppBarWindow::OnLocalUsageUpdated() {
         std::lock_guard lock(backgroundResultMutex_);
         result = std::move(pendingLocalUsageResult_);
         pendingLocalUsageResult_.reset();
+        if (pendingActivityOverview_ && !pendingActivityOverview_->first.cancelled && pendingActivityOverview_->first.query.period == activityPeriod_) {
+            activityOverview_ = std::move(pendingActivityOverview_->first);
+            activityPreview_ = std::move(pendingActivityOverview_->second);
+        }
+        pendingActivityOverview_.reset();
     }
     localUsageInFlight_ = false;
     if (result.has_value()) {
         localUsageSnapshot_ = std::move(*result);
+    }
+    if (activityWindow_) activityWindow_->Update(localUsageSnapshot_, language_ == Language::Chinese);
+    const bool cancelled = localUsageSnapshot_.errorMessage.find(L"cancelled") != std::wstring::npos;
+    if (pendingLocalRefresh_ || (!cancelled && activityOverview_.query.period != activityPeriod_)) {
+        pendingLocalRefresh_ = false;
+        RequestLocalUsageRefresh(true);
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
     RenderLayeredSurface();
@@ -2400,6 +2423,38 @@ std::wstring AppBarWindow::BuildResetCreditsExpiryText() const {
 }
 
 bool AppBarWindow::TryHandleControlClick(POINT clientPoint) {
+    if (!settingsOpen_ && PtInRect(&activityPeriodRect_, clientPoint)) {
+        HMENU menu = CreatePopupMenu();
+        const wchar_t* names[] = {LocalizeText(L"Today",L"今日"),LocalizeText(L"Yesterday",L"昨日"),LocalizeText(L"Last 7 days",L"近 7 日"),
+            LocalizeText(L"Last 30 days",L"近 30 日"),LocalizeText(L"This week",L"本週"),LocalizeText(L"This month",L"本月"),LocalizeText(L"All records",L"全部紀錄")};
+        for(int i=0;i<7;++i) AppendMenuW(menu,MF_STRING|(static_cast<int>(activityPeriod_)==i?MF_CHECKED:0),i+1,names[i]);
+        POINT p{activityPeriodRect_.left,activityPeriodRect_.bottom};ClientToScreen(hwnd_,&p);
+        contextMenuOpen_=true;const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD,p.x,p.y,0,hwnd_,nullptr);contextMenuOpen_=false;DestroyMenu(menu);
+        if(command){activityPeriod_=static_cast<activity::Period>(command-1);RequestLocalUsageRefresh(true);}
+        return true;
+    }
+    if (!settingsOpen_ && PtInRect(&activityRemoteRect_, clientPoint)) {
+        activityRemoteOpen_=!activityRemoteOpen_;RenderLayeredSurface();return true;
+    }
+    if (!settingsOpen_ && PtInRect(&activityRemoteDetailsRect_, clientPoint)) {
+        auto flag = [&](bool present, bool value) { return !present ? L"—" : value ? LocalizeText(L"Yes", L"是") : LocalizeText(L"No", L"否"); };
+        std::wstring info = std::wstring(LocalizeText(L"Allowed: ", L"允許使用：")) + flag(snapshot_.endpointStatus.hasAllowed, snapshot_.endpointStatus.allowed)
+            + L"\n" + LocalizeText(L"Limit reached: ", L"已達使用上限：") + flag(snapshot_.endpointStatus.hasLimitReached, snapshot_.endpointStatus.limitReached)
+            + L"\n" + LocalizeText(L"Credits enabled: ", L"已啟用點數：") + flag(snapshot_.credits.hasCredits, snapshot_.credits.creditsEnabled)
+            + L"\n" + LocalizeText(L"Unlimited credits: ", L"不限點數：") + flag(snapshot_.credits.hasUnlimited, snapshot_.credits.unlimited)
+            + L"\n" + LocalizeText(L"Credit balance: ", L"點數餘額：") + (snapshot_.credits.hasBalance ? std::to_wstring(snapshot_.credits.balance) : L"—")
+            + L"\n" + LocalizeText(L"Overage limit reached: ", L"已達額外用量上限：") + flag(snapshot_.credits.hasOverageLimitReached, snapshot_.credits.overageLimitReached)
+            + L"\n" + LocalizeText(L"Spend control reached: ", L"已達支出控制上限：") + flag(snapshot_.spendControl.hasReached, snapshot_.spendControl.reached)
+            + L"\n\n" + BuildResetCreditsSummaryText();
+        contextMenuOpen_ = true;
+        MessageBoxW(hwnd_, info.c_str(), LocalizeText(L"Remote account status", L"遠端帳戶狀態"), MB_OK | MB_ICONINFORMATION);
+        contextMenuOpen_ = false;
+        return true;
+    }
+    if (!settingsOpen_ && PtInRect(&activityDetailsRect_, clientPoint)) {
+        OpenActivityAnalysis();
+        return true;
+    }
     if (settingsOpen_) {
         if (closeButtonRect_.right > closeButtonRect_.left
             && PtInRect(&closeButtonRect_, clientPoint)) {
@@ -2434,6 +2489,9 @@ bool AppBarWindow::TryHandleControlClick(POINT clientPoint) {
             UpdateWindowBounds(true);
             SaveSettings();
             RenderLayeredSurface();
+            return true;
+        }
+        if (quotaClicked || activityClicked) {
             return true;
         }
     }
@@ -2487,6 +2545,8 @@ void AppBarWindow::Paint(HDC hdc) {
 }
 
 void AppBarWindow::PaintContent(const RECT& clientRect) {
+    activityDetailsRect_ = {};
+    activityPeriodRect_ = {}; activityRemoteRect_ = {}; activityRemoteDetailsRect_ = {};
     refreshButtonRect_ = {};
     quotaTabRect_ = {};
     activityTabRect_ = {};
@@ -3218,284 +3278,60 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         y = activityTabRect_.bottom + cardGap;
 
         if (fullPage_ == codex_widget::FullPage::Activity) {
-            const bool localAvailable = localUsageSnapshot_.available;
-            const auto localValue = [&](std::uint64_t value) {
-                return localAvailable ? formatActivityCount(value) : std::wstring(L"--");
-            };
-            const std::wstring metricTitles[] = {
-                LocalizeText(L"Today tokens", L"今日 Token"),
-                LocalizeText(L"Local tokens", L"本機累計 Token"),
-                LocalizeText(L"Today tasks", L"今日任務"),
-                LocalizeText(L"Local tasks", L"本機任務"),
-                LocalizeText(L"Today turns", L"今日回合"),
-                LocalizeText(L"Local turns", L"本機回合"),
-            };
-            const std::wstring metricValues[] = {
-                localValue(localUsageSnapshot_.today.totalTokens),
-                localValue(localUsageSnapshot_.recordedTotal.totalTokens),
-                localValue(localUsageSnapshot_.todayTaskCount),
-                localValue(localUsageSnapshot_.recordedTaskCount),
-                localValue(localUsageSnapshot_.todayTurnCount),
-                localValue(localUsageSnapshot_.recordedTurnCount),
-            };
-
-            const int summaryGap = ScaleForDpi(hwnd_, 8);
-            const int summaryHeight = ScaleForDpi(hwnd_, 66);
-            const int summaryWidth = (RectWidth(headerRect) - summaryGap * 2) / 3;
-            for (int index = 0; index < 6; ++index) {
-                const int row = index / 3;
-                const int column = index % 3;
-                const int left = headerRect.left + column * (summaryWidth + summaryGap);
-                const RECT card = MakeRect(
-                    left,
-                    y + row * (summaryHeight + summaryGap),
-                    column == 2 ? headerRect.right : left + summaryWidth,
-                    y + row * (summaryHeight + summaryGap) + summaryHeight);
-                fillCard(card, index % 2 == 0 ? cardBlue : cardLavender);
-                drawOpaqueTextLine(
-                    textFormatFoot_.Get(), metricTitles[index],
-                    MakeRect(card.left + ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 5),
-                        card.right - ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 23)),
-                    textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-                drawOpaqueTextLine(
-                    textFormatMetricValue_.Get(), metricValues[index],
-                    MakeRect(card.left + ScaleForDpi(hwnd_, 9), card.top + ScaleForDpi(hwnd_, 23),
-                        card.right - ScaleForDpi(hwnd_, 9), card.bottom - ScaleForDpi(hwnd_, 5)),
-                    textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
+            const bool ready = activityOverview_.available && activityOverview_.query.period == activityPeriod_;
+            const bool zh = language_ == Language::Chinese;
+            const auto count = [&](std::uint64_t value) { return ready ? activity::Number(value, zh) : std::wstring(L"—"); };
+            const wchar_t* periods[] = {LocalizeText(L"Today",L"今日"),LocalizeText(L"Yesterday",L"昨日"),LocalizeText(L"Last 7 days",L"近 7 日"),
+                LocalizeText(L"Last 30 days",L"近 30 日"),LocalizeText(L"This week",L"本週"),LocalizeText(L"This month",L"本月"),LocalizeText(L"All records",L"全部紀錄")};
+            activityPeriodRect_ = MakeRect(headerRect.left,y,headerRect.left+ScaleForDpi(hwnd_,126),y+ScaleForDpi(hwnd_,32));
+            fillInteractiveHitTarget(activityPeriodRect_);drawOpaqueRounded(activityPeriodRect_,cardNeutral,0.85f);
+            drawOpaqueTextLine(textFormatFoot_.Get(),std::wstring(periods[static_cast<int>(activityPeriod_)])+L" ▾",activityPeriodRect_,textPrimary,DWRITE_TEXT_ALIGNMENT_CENTER);
+            drawOpaqueTextLine(textFormatFoot_.Get(),LocalizeText(L"Local records",L"本機紀錄"),MakeRect(activityPeriodRect_.right+10,y,headerRect.right,y+32),textSecondary,DWRITE_TEXT_ALIGNMENT_TRAILING);
+            y+=ScaleForDpi(hwnd_,42);
+            const wchar_t* labels[] = {activityPeriod_ == activity::Period::Today ? LocalizeText(L"Today tokens",L"今日 Token") : LocalizeText(L"Period tokens",L"期間 Token"),LocalizeText(L"Active tasks",L"活躍任務"),LocalizeText(L"User turns",L"使用者回合"),
+                LocalizeText(L"Local tokens",L"本機累計 Token"),LocalizeText(L"Local tasks",L"本機任務"),LocalizeText(L"Local turns",L"本機回合")};
+            const std::uint64_t values[] = {activityOverview_.tokens.totalTokens,activityOverview_.activeTasks,activityOverview_.turns,
+                localUsageSnapshot_.recordedTotal.totalTokens,localUsageSnapshot_.recordedTaskCount,localUsageSnapshot_.recordedTurnCount};
+            int gap=ScaleForDpi(hwnd_,10),cw=(RectWidth(headerRect)-gap*2)/3,ch=ScaleForDpi(hwnd_,67);
+            for(int i=0;i<6;++i){RECT c=MakeRect(headerRect.left+(i%3)*(cw+gap),y+(i/3)*(ch+gap),headerRect.left+(i%3)*(cw+gap)+cw,y+(i/3)*(ch+gap)+ch);
+                drawOpaqueRounded(c,i<3?cardBlue:cardNeutral,0.88f);
+                drawOpaqueTextLine(textFormatFoot_.Get(),labels[i],MakeRect(c.left+10,c.top+6,c.right-6,c.top+27),textSecondary,DWRITE_TEXT_ALIGNMENT_LEADING);
+                drawOpaqueTextLine(textFormatMetricValue_.Get(),i<3?count(values[i]):(localUsageSnapshot_.available?activity::Number(values[i],zh):L"—"),MakeRect(c.left+10,c.top+28,c.right-6,c.bottom-4),textPrimary,DWRITE_TEXT_ALIGNMENT_LEADING);}
+            y+=2*(ch+gap);
+            RECT trend=MakeRect(headerRect.left,y,headerRect.right,y+ScaleForDpi(hwnd_,105));drawOpaqueRounded(trend,cardNeutral,0.8f);
+            drawOpaqueTextLine(textFormatFoot_.Get(),LocalizeText(L"Last 7 days · tokens",L"近 7 日預覽 · Token"),MakeRect(trend.left+12,trend.top+5,trend.right-12,trend.top+29),textPrimary,DWRITE_TEXT_ALIGNMENT_LEADING);
+            std::uint64_t maxValue=1;for(const auto& day:activityPreview_.days)maxValue=std::max(maxValue,day.tokens.totalTokens);
+            int graphWidth=RectWidth(trend)-ScaleForDpi(hwnd_,28),barWidth=graphWidth/7;
+            for(size_t i=0;i<activityPreview_.days.size()&&i<7;++i){auto& day=activityPreview_.days[i];int h=static_cast<int>(static_cast<long double>(day.tokens.totalTokens)/maxValue*ScaleForDpi(hwnd_,43));
+                RECT bar=MakeRect(trend.left+14+static_cast<int>(i)*barWidth,trend.bottom-23-h,trend.left+14+static_cast<int>(i+1)*barWidth-6,trend.bottom-23);fillRect(bar,heroValue);
+                drawOpaqueTextLine(textFormatFoot_.Get(),activity::Date(day.start).substr(5),MakeRect(bar.left,trend.bottom-22,bar.right+4,trend.bottom-1),textSecondary,DWRITE_TEXT_ALIGNMENT_CENTER);}
+            y=trend.bottom+gap;
+            RECT breakdown=MakeRect(headerRect.left,y,headerRect.right,y+ScaleForDpi(hwnd_,67));drawOpaqueRounded(breakdown,cardNeutral,0.8f);
+            drawOpaqueTextLine(textFormatFoot_.Get(),LocalizeText(L"Period composition",L"期間 Token 分類"),MakeRect(breakdown.left+12,y+5,breakdown.right-12,y+27),textPrimary,DWRITE_TEXT_ALIGNMENT_LEADING);
+            std::wstring composition=std::wstring(LocalizeText(L"Input ",L"輸入 "))+count(activityOverview_.tokens.inputTokens)+L"  ·  "+LocalizeText(L"Output ",L"輸出 ")+count(activityOverview_.tokens.outputTokens);
+            drawOpaqueTextLine(textFormatFoot_.Get(),composition,MakeRect(breakdown.left+12,y+30,breakdown.right-12,breakdown.bottom-5),textPrimary,DWRITE_TEXT_ALIGNMENT_LEADING);
+            y=breakdown.bottom+gap;
+            activityRemoteRect_=MakeRect(headerRect.left,y,headerRect.right,y+ScaleForDpi(hwnd_,32));fillInteractiveHitTarget(activityRemoteRect_);
+            drawOpaqueRounded(activityRemoteRect_,cardNeutral,0.75f);
+            drawOpaqueTextLine(textFormatFoot_.Get(),std::wstring(activityRemoteOpen_?L"▾ ":L"▸ ")+LocalizeText(L"Remote account status",L"遠端帳戶狀態"),activityRemoteRect_,textPrimary,DWRITE_TEXT_ALIGNMENT_CENTER);
+            if(activityRemoteOpen_){
+                const std::wstring details=std::wstring(LocalizeText(L"Status: ",L"使用狀態："))+(snapshot_.endpointStatus.hasAllowed?(snapshot_.endpointStatus.allowed?LocalizeText(L"Allowed",L"允許"):LocalizeText(L"Limited",L"受限")):L"—")
+                    +L" · "+BuildResetCreditsSummaryText();
+                drawOpaqueTextLine(textFormatFoot_.Get(),details,MakeRect(headerRect.left,y+34,headerRect.right,y+58),textSecondary,DWRITE_TEXT_ALIGNMENT_LEADING);
+                activityRemoteDetailsRect_ = MakeRect(headerRect.left, y + ScaleForDpi(hwnd_, 58), headerRect.right, y + ScaleForDpi(hwnd_, 82));
+                fillInteractiveHitTarget(activityRemoteDetailsRect_);
+                drawOpaqueTextLine(textFormatFoot_.Get(), LocalizeText(L"View account details →", L"查看完整帳戶狀態 →"), activityRemoteDetailsRect_, textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
             }
-            y += summaryHeight * 2 + summaryGap + cardGap;
-
-            const bool compactChineseLayout = language_ == Language::Chinese;
-            // Chinese values use 萬／億／兆 and are wider than the English
-            // K/M/B abbreviations. Give them two rows across three columns so
-            // every today/local pair remains readable at the compact width.
-            const int breakdownHeight = ScaleForDpi(hwnd_, compactChineseLayout ? 112 : 92);
-            const RECT breakdownCard = MakeRect(headerRect.left, y, headerRect.right, y + breakdownHeight);
-            fillCard(breakdownCard, cardNeutral);
-            drawOpaqueTextLine(
-                textFormatMetricLabel_.Get(), LocalizeText(L"Token breakdown · today / local", L"Token 分類 · 今日／本機累計"),
-                MakeRect(breakdownCard.left + ScaleForDpi(hwnd_, 12), breakdownCard.top + ScaleForDpi(hwnd_, 4),
-                    breakdownCard.right - ScaleForDpi(hwnd_, 12), breakdownCard.top + ScaleForDpi(hwnd_, 25)),
-                textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            const std::wstring breakdownTitles[] = {
-                LocalizeText(L"Input", L"輸入"),
-                LocalizeText(L"Output", L"輸出"),
-                LocalizeText(L"Cached", L"快取輸入"),
-                LocalizeText(L"Cache write", L"快取寫入"),
-                LocalizeText(L"Reasoning", L"推理輸出"),
-            };
-            const std::uint64_t todayBreakdown[] = {
-                localUsageSnapshot_.today.inputTokens,
-                localUsageSnapshot_.today.outputTokens,
-                localUsageSnapshot_.today.cachedInputTokens,
-                localUsageSnapshot_.today.cacheWriteInputTokens,
-                localUsageSnapshot_.today.reasoningOutputTokens,
-            };
-            const std::uint64_t totalBreakdown[] = {
-                localUsageSnapshot_.recordedTotal.inputTokens,
-                localUsageSnapshot_.recordedTotal.outputTokens,
-                localUsageSnapshot_.recordedTotal.cachedInputTokens,
-                localUsageSnapshot_.recordedTotal.cacheWriteInputTokens,
-                localUsageSnapshot_.recordedTotal.reasoningOutputTokens,
-            };
-            const int breakdownLeft = breakdownCard.left + ScaleForDpi(hwnd_, 10);
-            const int breakdownWidth = RectWidth(breakdownCard) - ScaleForDpi(hwnd_, 20);
-            if (!compactChineseLayout) {
-                for (int index = 0; index < 5; ++index) {
-                    const int left = breakdownLeft + breakdownWidth * index / 5;
-                    const int right = breakdownLeft + breakdownWidth * (index + 1) / 5;
-                    drawOpaqueTextLine(
-                        textFormatFoot_.Get(), breakdownTitles[index],
-                        MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 27), right,
-                            breakdownCard.top + ScaleForDpi(hwnd_, 46)),
-                        textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
-                    const std::wstring value = localAvailable
-                        ? (formatActivityCount(todayBreakdown[index]) + L" / "
-                            + formatActivityCount(totalBreakdown[index]))
-                        : L"--";
-                    drawOpaqueTextLine(
-                        textFormatFoot_.Get(), value,
-                        MakeRect(left, breakdownCard.top + ScaleForDpi(hwnd_, 47), right,
-                            breakdownCard.bottom - ScaleForDpi(hwnd_, 5)),
-                        textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
-                }
-            } else {
-                constexpr int kBreakdownColumns = 3;
-                const int rowTop = breakdownCard.top + ScaleForDpi(hwnd_, 27);
-                const int rowHeight = ScaleForDpi(hwnd_, 37);
-                for (int index = 0; index < 5; ++index) {
-                    const int row = index / kBreakdownColumns;
-                    const int column = index % kBreakdownColumns;
-                    const int left = breakdownLeft + breakdownWidth * column / kBreakdownColumns;
-                    const int right = breakdownLeft + breakdownWidth * (column + 1) / kBreakdownColumns;
-                    const int top = rowTop + row * rowHeight;
-                    const int bottom = row == 1
-                        ? breakdownCard.bottom - ScaleForDpi(hwnd_, 5)
-                        : top + rowHeight;
-                    drawOpaqueTextLine(
-                        textFormatFoot_.Get(), breakdownTitles[index],
-                        MakeRect(left, top, right, top + ScaleForDpi(hwnd_, 18)),
-                        textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
-                    const std::wstring value = localAvailable
-                        ? (formatActivityCount(todayBreakdown[index]) + L" / "
-                            + formatActivityCount(totalBreakdown[index]))
-                        : L"--";
-                    drawOpaqueTextLine(
-                        textFormatFoot_.Get(), value,
-                        MakeRect(left, top + ScaleForDpi(hwnd_, 17), right, bottom),
-                        textPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
-                }
-            }
-            y = breakdownCard.bottom + cardGap;
-
-            const int accountHeight = ScaleForDpi(hwnd_, 72);
-            const RECT accountCard = MakeRect(headerRect.left, y, headerRect.right, y + accountHeight);
-            fillCard(accountCard, cardLavender);
-            std::wstring accessText = LocalizeText(L"Access: --", L"使用狀態：--");
-            if (snapshot_.endpointStatus.hasAllowed) {
-                accessText = snapshot_.endpointStatus.allowed
-                    ? LocalizeText(L"Access: allowed", L"使用狀態：允許")
-                    : LocalizeText(L"Access: limited", L"使用狀態：受限");
-            } else if (snapshot_.endpointStatus.hasLimitReached) {
-                accessText = snapshot_.endpointStatus.limitReached
-                    ? LocalizeText(L"Access: limit reached", L"使用狀態：已達限制")
-                    : LocalizeText(L"Access: available", L"使用狀態：可用");
-            }
-            if (!snapshot_.endpointStatus.rateLimitReachedType.empty()) {
-                accessText += L" · " + snapshot_.endpointStatus.rateLimitReachedType;
-            }
-            std::wstring creditsText = LocalizeText(L"Credits: --", L"Credits：--");
-            if (snapshot_.credits.hasUnlimited && snapshot_.credits.unlimited) {
-                creditsText = LocalizeText(L"Credits: unlimited", L"Credits：無限制");
-            } else if (snapshot_.credits.hasBalance) {
-                creditsText = std::wstring(LocalizeText(L"Credits balance: ", L"Credits 餘額："))
-                    + FormatNumberNoUnit(snapshot_.credits.balance);
-            } else if (snapshot_.credits.hasCredits) {
-                creditsText = snapshot_.credits.creditsEnabled
-                    ? LocalizeText(L"Credits: enabled", L"Credits：可用")
-                    : LocalizeText(L"Credits: none", L"Credits：無");
-            }
-            if (snapshot_.credits.hasApproxLocalMessages) {
-                creditsText += std::wstring(LocalizeText(L" · Local msg ", L" · 本機訊息 "))
-                    + std::to_wstring(snapshot_.credits.approxLocalMessagesMin) + L"–"
-                    + std::to_wstring(snapshot_.credits.approxLocalMessagesMax);
-            }
-            if (snapshot_.credits.hasApproxCloudMessages) {
-                creditsText += std::wstring(LocalizeText(L" · Cloud ", L" · 雲端 "))
-                    + std::to_wstring(snapshot_.credits.approxCloudMessagesMin) + L"–"
-                    + std::to_wstring(snapshot_.credits.approxCloudMessagesMax);
-            }
-            std::wstring controlsText = snapshot_.spendControl.hasReached
-                ? (snapshot_.spendControl.reached
-                    ? std::wstring(LocalizeText(L"Spend control: reached", L"支出限制：已達"))
-                    : std::wstring(LocalizeText(L"Spend control: OK", L"支出限制：正常")))
-                : std::wstring(LocalizeText(L"Spend control: --", L"支出限制：--"));
-            if (snapshot_.hasApplicableResetCredits) {
-                controlsText += std::wstring(LocalizeText(L" · Applicable resets ", L" · 適用重設卡 "))
-                    + std::to_wstring(snapshot_.applicableResetCredits);
-            }
-            drawOpaqueTextLine(textFormatFoot_.Get(), accessText,
-                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 3),
-                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 25)),
-                textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            drawOpaqueTextLine(textFormatFoot_.Get(), creditsText,
-                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 25),
-                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 48)),
-                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            drawOpaqueTextLine(textFormatFoot_.Get(), controlsText,
-                MakeRect(accountCard.left + ScaleForDpi(hwnd_, 12), accountCard.top + ScaleForDpi(hwnd_, 48),
-                    accountCard.right - ScaleForDpi(hwnd_, 12), accountCard.bottom - ScaleForDpi(hwnd_, 2)),
-                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            y = accountCard.bottom + cardGap;
-
-            const int statusBottom = static_cast<int>(panelRect.bottom) - ScaleForDpi(hwnd_, 58);
-            const int statusHeight = std::max(ScaleForDpi(hwnd_, 84), statusBottom - y);
-            const RECT statusCard = MakeRect(
-                headerRect.left, y, headerRect.right,
-                std::min(statusBottom, y + statusHeight));
-            fillCard(statusCard, cardNeutral);
-            const std::wstring stateText = localUsageInFlight_
-                ? (localAvailable
-                    ? LocalizeText(L"Refreshing", L"更新中")
-                    : LocalizeText(L"Indexing", L"建立索引中"))
-                : (!localAvailable
-                    ? LocalizeText(L"Unavailable", L"無法取得")
-                    : (localUsageSnapshot_.partial
-                        ? LocalizeText(L"Partial", L"部分完成")
-                        : LocalizeText(L"Ready", L"就緒")));
-            const std::wstring coverageText = localAvailable
-                ? (std::wstring(LocalizeText(L"Coverage ", L"紀錄起始 "))
-                    + (localUsageSnapshot_.coverageStartUnixSeconds > 0
-                        ? FormatFullDateTime(localUsageSnapshot_.coverageStartUnixSeconds)
-                        : L"--")
-                    + std::wstring(LocalizeText(L" · Last event ", L" · 最後事件 "))
-                    + (localUsageSnapshot_.lastEventUnixSeconds > 0
-                        ? FormatFullDateTime(localUsageSnapshot_.lastEventUnixSeconds)
-                        : L"--"))
-                : localUsageSnapshot_.errorMessage;
-            const std::wstring scanText = localAvailable
-                ? (std::wstring(LocalizeText(L"Last scan ", L"最後掃描 "))
-                    + FormatFullDateTime(localUsageSnapshot_.lastScanUnixSeconds)
-                    + std::wstring(LocalizeText(L" · Files ", L" · 檔案 "))
-                    + std::to_wstring(localUsageSnapshot_.filesDiscovered)
-                    + std::wstring(LocalizeText(L" · This pass ", L" · 本輪讀取 "))
-                    + codex_usage::FormatCompactCount(localUsageSnapshot_.bytesReadThisScan) + L"B")
-                : std::wstring(LocalizeText(L"Local session data was not available", L"無法取得本機 session 資料"));
-            drawOpaqueTextLine(textFormatMetricLabel_.Get(),
-                std::wstring(LocalizeText(L"Local index · ", L"本機索引 · ")) + stateText,
-                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 3),
-                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 27)),
-                localUsageSnapshot_.partial ? RGB(233, 180, 91) : textPrimary,
-                DWRITE_TEXT_ALIGNMENT_LEADING);
-            drawOpaqueTextLine(textFormatFoot_.Get(), coverageText,
-                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 27),
-                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 51)),
-                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            drawOpaqueTextLine(textFormatFoot_.Get(), scanText,
-                MakeRect(statusCard.left + ScaleForDpi(hwnd_, 12), statusCard.top + ScaleForDpi(hwnd_, 51),
-                    statusCard.right - ScaleForDpi(hwnd_, 12), statusCard.bottom - ScaleForDpi(hwnd_, 3)),
-                textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-
-            const int refreshSize = ScaleForDpi(hwnd_, 34);
-            refreshButtonRect_ = MakeRect(
-                panelRect.right - fullPad - refreshSize,
-                panelRect.bottom - ScaleForDpi(hwnd_, 46),
-                panelRect.right - fullPad,
-                panelRect.bottom - ScaleForDpi(hwnd_, 12));
-            fillInteractiveHitTarget(refreshButtonRect_);
-            const bool anyRefreshInFlight = refreshInFlight_ || localUsageInFlight_;
-            if (anyRefreshInFlight) {
-                fillEllipse(
-                    D2D1::Ellipse(
-                        D2D1::Point2F(
-                            static_cast<float>(refreshButtonRect_.left + RectWidth(refreshButtonRect_) / 2),
-                            static_cast<float>(refreshButtonRect_.top + RectHeight(refreshButtonRect_) / 2)),
-                        static_cast<float>(refreshSize) * 0.48f,
-                        static_cast<float>(refreshSize) * 0.48f),
-                    heroValue, 0.14f);
-            }
-            if (undoIconBitmap_) {
-                DrawAssetBitmap(undoIconBitmap_.Get(), refreshButtonRect_, 1.0f);
-            }
-            const RECT footerLeftRect = MakeRect(
-                panelRect.left + fullPad, panelRect.bottom - ScaleForDpi(hwnd_, 46),
-                panelRect.left + RectWidth(panelRect) / 2, panelRect.bottom - ScaleForDpi(hwnd_, 12));
-            const RECT footerRightRect = MakeRect(
-                panelRect.left + RectWidth(panelRect) / 2, panelRect.bottom - ScaleForDpi(hwnd_, 46),
-                refreshButtonRect_.left - ScaleForDpi(hwnd_, 10), panelRect.bottom - ScaleForDpi(hwnd_, 12));
-            drawOpaqueTextLine(textFormatFoot_.Get(), GetVersionStatusText(true), footerLeftRect,
-                updateAvailable_ ? heroValue : textSecondary, DWRITE_TEXT_ALIGNMENT_LEADING);
-            drawOpaqueTextLine(
-                textFormatFoot_.Get(),
-                anyRefreshInFlight
-                    ? LocalizeText(L"Refreshing remote + local", L"正在更新遠端與本機資料")
-                    : (GetRefreshStatusText() + std::wstring(LocalizeText(L" · Local 15s", L" · 本機 15 秒"))),
-                footerRightRect,
-                anyRefreshInFlight ? heroValue : textSecondary,
-                DWRITE_TEXT_ALIGNMENT_TRAILING);
+            const int bottom=panelRect.bottom-ScaleForDpi(hwnd_,12);
+            activityDetailsRect_=MakeRect(headerRect.left,bottom-ScaleForDpi(hwnd_,34),headerRect.left+ScaleForDpi(hwnd_,158),bottom);
+            fillInteractiveHitTarget(activityDetailsRect_);drawOpaqueRounded(activityDetailsRect_,cardBlue,0.96f);
+            drawOpaqueTextLine(textFormatFoot_.Get(),LocalizeText(L"Activity analysis →",L"活動分析 →"),activityDetailsRect_,textPrimary,DWRITE_TEXT_ALIGNMENT_CENTER);
+            refreshButtonRect_=MakeRect(headerRect.right-ScaleForDpi(hwnd_,34),bottom-ScaleForDpi(hwnd_,34),headerRect.right,bottom);
+            fillInteractiveHitTarget(refreshButtonRect_);if(undoIconBitmap_)DrawAssetBitmap(undoIconBitmap_.Get(),refreshButtonRect_,1.0f);
+            std::wstring state=localUsageInFlight_?LocalizeText(L"Updating",L"更新中"):localUsageSnapshot_.partial?LocalizeText(L"Partial records",L"資料不完整"):LocalizeText(L"Local index ready",L"本機索引就緒");
+            drawOpaqueTextLine(textFormatFoot_.Get(),state,MakeRect(activityDetailsRect_.right+8,activityDetailsRect_.top,refreshButtonRect_.left-8,bottom),textSecondary,DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
-
         auto drawSummaryCard = [&](const RECT& cardRect,
                                    const std::wstring& title,
                                    const UsageWindow& window,
@@ -3525,15 +3361,37 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                     cardRect.right - inner, cardRect.top + ScaleForDpi(hwnd_, 67)),
                 textPrimary,
                 DWRITE_TEXT_ALIGNMENT_LEADING);
-            const std::wstring resetText = window.available
-                ? std::wstring(LocalizeText(L"Reset in ", L"重設倒數 ")) + FormatDuration(window.resetAfterSeconds)
-                : LocalizeText(L"Unavailable", L"目前無法取得");
+            std::wstring resetStatusText;
+            std::wstring resetTimeText;
+            if (!window.available) {
+                resetStatusText = LocalizeText(L"Unavailable", L"目前無法取得");
+            } else {
+                const std::wstring resetClock = FormatDateTime(window.resetAtUnixSeconds);
+                const bool resetHasStarted = window.resetAfterSeconds > 0;
+                const bool resetIsInFuture = window.resetAtUnixSeconds > static_cast<long long>(std::time(nullptr));
+                if (resetHasStarted) {
+                    resetStatusText = std::wstring(LocalizeText(L"Reset in ", L"重設倒數 "))
+                        + FormatDuration(window.resetAfterSeconds);
+                } else if (resetIsInFuture) {
+                    resetStatusText = LocalizeText(L"Not started", L"尚未開始");
+                } else {
+                    resetStatusText = LocalizeText(L"Reset", L"重設");
+                }
+                resetTimeText = std::wstring(LocalizeText(L"Expires ", L"到期時間 ")) + resetClock;
+            }
             drawOpaqueTextLine(
                 textFormatFoot_.Get(),
-                resetText,
-                MakeRect(cardRect.left + inner, cardRect.bottom - ScaleForDpi(hwnd_, 33),
-                    cardRect.right - inner, cardRect.bottom - ScaleForDpi(hwnd_, 17)),
+                resetStatusText,
+                MakeRect(cardRect.left + inner, cardRect.bottom - ScaleForDpi(hwnd_, 45),
+                    cardRect.right - inner, cardRect.bottom - ScaleForDpi(hwnd_, 31)),
                 textSecondary,
+                DWRITE_TEXT_ALIGNMENT_LEADING);
+            drawOpaqueTextLine(
+                textFormatMetricLabel_.Get(),
+                resetTimeText,
+                MakeRect(cardRect.left + inner, cardRect.bottom - ScaleForDpi(hwnd_, 30),
+                    cardRect.right - inner, cardRect.bottom - ScaleForDpi(hwnd_, 16)),
+                textPrimary,
                 DWRITE_TEXT_ALIGNMENT_LEADING);
             const RECT track = MakeRect(
                 cardRect.left + inner,
@@ -4111,6 +3969,15 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
 }
 
+void AppBarWindow::OpenActivityAnalysis() {
+    if (!activityWindow_) activityWindow_ = std::make_unique<ActivityDetailsWindow>();
+    activityWindow_->Open(hwnd_, language_ == Language::Chinese, localUsageSnapshot_, GetSettingsPath(), [this](int action) {
+        if (action == 2) { pendingLocalRefresh_ = pendingLocalRebuild_ = false; localUsageWorker_.request_stop(); return; }
+        if (action == 1) pendingLocalRebuild_ = true;
+        RequestLocalUsageRefresh(true);
+    });
+}
+
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     HMENU languageMenu = CreatePopupMenu();
@@ -4142,6 +4009,7 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
         kCommandTaskbarMode, LocalizeText(L"Taskbar mode", L"任務模式"));
 
     AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即重新整理"));
+    AppendMenuW(menu, MF_STRING, 6001, LocalizeText(L"Activity analysis", L"活動分析"));
     AppendMenuW(menu, MF_STRING, kCommandCheckVersion, LocalizeText(L"Check version", L"檢查版本"));
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshIntervalMenu), LocalizeText(L"Refresh interval", L"重新整理間隔"));
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
@@ -4156,10 +4024,17 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCommandExit, LocalizeText(L"Exit", L"離開"));
 
+    contextMenuOpen_ = true;
+    CancelMouseLeaveTracking();
+    StopHoverExitGuard();
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+    contextMenuOpen_ = false;
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    if (command == kCommandRefresh) {
+    if (command == 6001) {
+        OpenActivityAnalysis();
+    } else if (command == kCommandRefresh) {
         RequestRefresh(true);
         RequestLocalUsageRefresh(true);
     } else if (command == kCommandCheckVersion) {

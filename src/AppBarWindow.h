@@ -3,6 +3,7 @@
 #include "CodexUsageFetcher.h"
 #include "LocalUsageStats.h"
 #include "WidgetPresentation.h"
+#include "ActivityDetailsWindow.h"
 
 #include <Windows.h>
 #include <d2d1.h>
@@ -27,6 +28,7 @@ public:
     int Run();
 
 private:
+    friend class AppBarWindowInteractionTests;
     static constexpr UINT kUsageUpdatedMessage = WM_APP + 1;
     static constexpr UINT kReleaseVersionUpdatedMessage = WM_APP + 2;
     static constexpr UINT kLocalUsageUpdatedMessage = WM_APP + 3;
@@ -137,6 +139,7 @@ private:
     void Paint(HDC hdc);
     void PaintContent(const RECT& clientRect);
     void ShowContextMenu(POINT screenPoint);
+    void OpenActivityAnalysis();
     int GetMinimumWidgetWidth() const;
     int GetMinimumWidgetHeight(int width) const;
     void SetLanguage(Language language);
@@ -176,6 +179,7 @@ private:
     bool hoverSuppressedUntilCursorLeavesBubble_ = false;
     bool settingsOpen_ = false;
     bool settingsDragging_ = false;
+    bool contextMenuOpen_ = false;
     Language language_ = Language::English;
     codex_widget::FullPage fullPage_ = codex_widget::FullPage::Quota;
     bool hasSavedRect_ = false;
@@ -202,6 +206,13 @@ private:
     RECT settingsSliderRect_ = {};
     RECT quotaTabRect_ = {};
     RECT activityTabRect_ = {};
+    RECT activityDetailsRect_ = {};
+    RECT activityPeriodRect_ = {}, activityRemoteRect_ = {}, activityRemoteDetailsRect_ = {};
+    activity::Period activityPeriod_ = activity::Period::Today;
+    bool activityRemoteOpen_ = false;
+    activity::Result activityOverview_, activityPreview_;
+    std::optional<std::pair<activity::Result, activity::Result>> pendingActivityOverview_;
+    std::unique_ptr<ActivityDetailsWindow> activityWindow_;
     HDC layeredDc_ = nullptr;
     HBITMAP layeredBitmap_ = nullptr;
     HBITMAP layeredPreviousBitmap_ = nullptr;
@@ -222,6 +233,7 @@ private:
     std::jthread usageWorker_;
     std::jthread releaseWorker_;
     std::jthread localUsageWorker_;
+    bool pendingLocalRefresh_ = false, pendingLocalRebuild_ = false;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;

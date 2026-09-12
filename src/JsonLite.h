@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -32,6 +33,7 @@ public:
 
     std::optional<bool> AsBool() const;
     std::optional<double> AsNumber() const;
+    std::optional<std::uint64_t> AsUnsignedInteger() const { return unsignedInteger_; }
     std::optional<int> AsInt() const;
     std::optional<std::string_view> AsString() const;
     const Object* AsObject() const;
@@ -40,6 +42,8 @@ public:
     const Value* Find(std::string_view key) const;
 
 private:
+    friend class Parser;
+    std::optional<std::uint64_t> unsignedInteger_;
     using Storage = std::variant<std::nullptr_t, bool, double, std::string, Object, Array>;
     Storage storage_ = nullptr;
 };

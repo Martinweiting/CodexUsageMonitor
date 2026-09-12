@@ -128,11 +128,16 @@ std::optional<Value> Parser::ParseValue() {
             break;
         default:
             if ((ch == '-') || (ch >= '0' && ch <= '9')) {
+                const auto start = pos_;
                 auto number = ParseNumber();
                 if (!number.has_value()) {
                     return std::nullopt;
                 }
-                return Value(*number);
+                Value result(*number);
+                std::uint64_t integer = 0;
+                const auto parsed = std::from_chars(text_.data() + start, text_.data() + pos_, integer);
+                if (parsed.ec == std::errc{} && parsed.ptr == text_.data() + pos_) result.unsignedInteger_ = integer;
+                return result;
             }
             break;
     }

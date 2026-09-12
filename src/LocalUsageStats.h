@@ -5,6 +5,7 @@
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 namespace codex_usage {
 
@@ -15,6 +16,38 @@ struct TokenUsageTotals {
     std::uint64_t outputTokens = 0;
     std::uint64_t reasoningOutputTokens = 0;
     std::uint64_t totalTokens = 0;
+};
+
+// Numeric metadata only. No titles, message text, paths or tool arguments.
+struct ActivityEvent {
+    std::uint32_t session = 0;
+    long long time = 0;
+    TokenUsageTotals tokens;
+    bool userTurn = false;
+    unsigned validFields = 0;
+    bool initialCounter = false;
+    std::string model, project;
+};
+struct ActivitySession {
+    std::string id;
+    long long created = 0;
+    bool topLevel = true;
+    unsigned origin = 2; // 0 explicit top-level, 1 non-top-level, 2 unknown
+    std::string client;
+    bool archived = false;
+};
+struct CompletedActivityTurn {
+    std::string sessionId, turnId;
+    long long completed = 0;
+    std::uint64_t durationMilliseconds = 0;
+    bool failed = false;
+};
+struct ActivityData {
+    std::vector<ActivitySession> sessions;
+    std::vector<ActivityEvent> events;
+    std::uint64_t malformedLines = 0, invalidTimes = 0, duplicates = 0, resets = 0;
+    long long generation = 0;
+    std::vector<CompletedActivityTurn> completedTurns;
 };
 
 struct LocalUsageSnapshot {
@@ -37,6 +70,8 @@ struct LocalUsageSnapshot {
     long long lastEventUnixSeconds = 0;
     long long lastScanUnixSeconds = 0;
     std::wstring errorMessage;
+    std::shared_ptr<const ActivityData> activity;
+    std::uint64_t scanMilliseconds = 0, cacheBytes = 0;
 };
 
 struct LocalUsagePaths {
@@ -59,6 +94,7 @@ public:
         std::stop_token stopToken = {},
         long long nowUnixSecondsOverride = 0,
         long long todayStartUnixSecondsOverride = 0);
+    void RequestRebuild() { rebuildRequested_ = true; }
 
     static LocalUsagePaths ResolveDefaultPaths();
 
@@ -67,6 +103,7 @@ private:
     std::unique_ptr<State> state_;
     bool stateLoaded_ = false;
     bool loadedFromCache_ = false;
+    bool rebuildRequested_ = false;
 };
 
 std::wstring FormatCompactCount(std::uint64_t value);
