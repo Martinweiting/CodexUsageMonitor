@@ -16,13 +16,11 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - x64
-          - ARM64
-
+    env:
+      BUILD_DIR: build-release
+      TEST_BUILD_DIR: build-tests
+      PACKAGE_DIR: artifacts/CodexUsageMonitor-v1.0.0-win-x64
+      PACKAGE_ZIP: artifacts/CodexUsageMonitor-v1.0.0-win-x64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,42 +29,54 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Configure
-        run: cmake -S . -B build-${{ matrix.arch }} -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DAPP_VERSION="${{ github.ref_name }}"
+        run: cmake -S . -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 -DAPP_VERSION="$env:GITHUB_REF_NAME"
 
       - name: Build Release
-        run: cmake --build build-${{ matrix.arch }} --config Release
+        run: cmake --build "$env:BUILD_DIR" --config Release
 
-      - name: Prepare artifact
+      - name: Configure tests
+        run: cmake -S . -B "$env:TEST_BUILD_DIR" -G "Visual Studio 17 2022" -A x64 -DAPP_VERSION="$env:GITHUB_REF_NAME" -DCODEX_USAGE_MONITOR_BUILD_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build "$env:TEST_BUILD_DIR" --config Release
+
+      - name: Run tests
+        run: ctest --test-dir "$env:TEST_BUILD_DIR" -C Release --output-on-failure
+
+      - name: Prepare x64 package
         shell: powershell
         run: |
-          $outDir = "artifacts/${{ matrix.arch }}"
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          Copy-Item "build-${{ matrix.arch }}/Release/CodexUsageMonitor.exe" "$outDir/CodexUsageMonitor-${{ matrix.arch }}.exe"
-          Copy-Item "README.md" "$outDir/README.md"
+          $packageDir = $env:PACKAGE_DIR
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "$env:BUILD_DIR/Release/CodexUsageMonitor.exe" "$packageDir/CodexUsageMonitor.exe"
+          Copy-Item "assets" "$packageDir/assets" -Recurse
+          Copy-Item "LICENSE" "$packageDir/LICENSE"
+          Copy-Item "THIRD_PARTY_NOTICES.md" "$packageDir/THIRD_PARTY_NOTICES.md"
+          Copy-Item "README.md" "$packageDir/README.md"
+          Compress-Archive -Path $packageDir -DestinationPath $env:PACKAGE_ZIP -Force
+
+      - name: Audit package
+        shell: powershell
+        run: |
+          $packageRoot = $env:PACKAGE_DIR
+          $required = @(
+            "$packageRoot/CodexUsageMonitor.exe",
+            "$packageRoot/assets",
+            "$packageRoot/LICENSE",
+            "$packageRoot/THIRD_PARTY_NOTICES.md",
+            "$packageRoot/assets/fonts/LICENSE-IANSUI.txt",
+            "$packageRoot/assets/fonts/LICENSE-QUANTICO.txt",
+            "$packageRoot/assets/fonts/LICENSE-STORYSCRIPT.txt"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "Missing package item: $path" }
+          }
+          $forbidden = Get-ChildItem -Recurse -File $packageRoot |
+            Where-Object { $_.Name -match '^(auth.json|settings.ini)$' -or $_.Name -match 'token|credential|secret' }
+          if ($forbidden) { throw "Forbidden credential-like package item: $($forbidden.FullName -join ', ')" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexUsageMonitor-${{ matrix.arch }}
-          path: artifacts/${{ matrix.arch }}
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          pattern: CodexUsageMonitor-*
-          merge-multiple: true
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            release-assets/CodexUsageMonitor-x64.exe
-            release-assets/CodexUsageMonitor-ARM64.exe
+          name: CodexUsageMonitor-v1.0.0-win-x64
+          path: artifacts/CodexUsageMonitor-v1.0.0-win-x64.zip
