@@ -107,6 +107,7 @@ private:
     bool TryHandleRefreshButtonClick(POINT clientPoint);
     std::wstring BuildResetCreditsSummaryText() const;
     std::wstring BuildResetCreditsExpiryText() const;
+    void ShowLowQuotaWarning(const UsageSnapshot& snapshot);
 
     HRESULT CreateDeviceIndependentResources();
     HRESULT CreateDeviceResources();
@@ -174,6 +175,7 @@ private:
     bool taskbarMode_ = false;
     bool hasReleaseCheckResult_ = false;
     bool updateAvailable_ = false;
+    bool lowQuotaWarningActive_ = false;
     codex_widget::PresentationState presentationState_ = codex_widget::PresentationState::Bubble;
     bool mouseTracking_ = false;
     bool hoverExitGuardActive_ = false;

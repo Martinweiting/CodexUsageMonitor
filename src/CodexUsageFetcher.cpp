@@ -262,6 +262,35 @@ std::vector<std::wstring> BuildCodexAuthHeaders(
     return headers;
 }
 
+std::optional<double> ExtractFiniteNumber(const jsonlite::Value* value) {
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+
+    if (const auto number = value->AsNumber(); number.has_value() && std::isfinite(*number)) {
+        return number;
+    }
+
+    // The live wham/usage API currently serializes credits.balance as a decimal string.
+    // Accept only a fully consumed, finite value so malformed optional data remains unavailable.
+    const auto text = value->AsString();
+    if (!text.has_value() || text->empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        size_t consumed = 0;
+        const std::string textValue(*text);
+        const double number = std::stod(textValue, &consumed);
+        if (consumed != textValue.size() || !std::isfinite(number)) {
+            return std::nullopt;
+        }
+        return number;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
     if (windowNode == nullptr || output == nullptr) {
         return false;
@@ -708,7 +737,7 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
             credits, "overage_limit_reached", &snapshot.credits.hasOverageLimitReached,
             &snapshot.credits.overageLimitReached);
         if (const jsonlite::Value* balance = credits->Find("balance"); balance != nullptr) {
-            if (const auto value = balance->AsNumber(); value.has_value() && std::isfinite(*value)) {
+            if (const auto value = ExtractFiniteNumber(balance); value.has_value()) {
                 snapshot.credits.hasBalance = true;
                 snapshot.credits.balance = *value;
             }

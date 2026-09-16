@@ -30,6 +30,10 @@
 *.tlog
 *.lastbuildstate
 
+# Local release/build backups and copied asset snapshots.
+*.exe.backup-*
+/assets-polluted-backup-*/
+
 # CMake local files and generated metadata.
 CMakeCache.txt
 CMakeFiles/

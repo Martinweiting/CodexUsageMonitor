@@ -1,11 +1,16 @@
 # Codex Usage Monitor
 
-Codex Usage Monitor is a native Windows desktop widget for two kinds of information:
+Codex Usage Monitor is an open-source native Windows desktop utility for
+monitoring Codex account quota, reset status, and local development activity.
 
-- remote Codex account quota and reset status;
-- local, read-only activity statistics derived from Codex session records.
+It combines remote quota monitoring with privacy-conscious local analytics
+derived from Codex session records, providing a persistent view of usage,
+token activity, tasks, trends, and reset windows without requiring users to
+inspect raw session files.
 
-It is implemented with Win32, Direct2D, DirectWrite, WinHTTP, and C++20. The application is designed to stay lightweight, keyboard/mouse friendly, and useful while working across multiple monitors.
+Built with C++20, Win32, Direct2D, DirectWrite, and WinHTTP. The application
+is designed to stay lightweight, keyboard/mouse friendly, and useful while
+working across multiple monitors.
 
 [繁體中文說明](README-zh.md)
 
@@ -38,11 +43,13 @@ It is implemented with Win32, Direct2D, DirectWrite, WinHTTP, and C++20. The app
 - Reads the Codex usage endpoint and displays the five-hour and weekly windows.
 - Shows used and remaining percentages, reset countdowns, reset timestamps, estimated window start times, and progress bars.
 - Shows the current account email and plan information when returned by the endpoint.
+- Shows the current remaining points balance in its own block directly below the quota section in Full mode.
 - Shows cycle pace: actual usage versus the expected budget, including below-budget or above-budget status.
 - Shows the remote endpoint state when available, including allowed, limit reached, or the returned rate-limit type.
 - Shows credits, overage, spend-control, and balance information when the account response provides those fields.
 - Shows the available rate-limit reset-credit inventory and expiry times. This is intentionally read-only: the application does not consume credits or send a reset request.
 - Supports manual refresh and configurable automatic refresh intervals of 1, 3, 5, 10, or 30 minutes.
+- Shows a warning dialog when either quota window reaches 2% remaining or less; the warning is de-duplicated until the quota recovers.
 - Checks for a newer GitHub release from the application menu.
 
 Remote quota and local activity are separate data sources. Local activity totals do not alter the remote quota display.
@@ -57,7 +64,7 @@ The floating widget starts as a small bubble. Hovering expands it, clicking pins
 
 The process is Per-Monitor-V2 DPI aware. Floating modes use the Windows virtual desktop, so they can be dragged between monitors—including monitor layouts with negative virtual-desktop coordinates. Taskbar mode follows the work area of the monitor containing the widget.
 
-The transparency control ranges from 20% to 80%; a higher value makes the glass more transparent. The current rendering intentionally avoids a native rectangular backdrop so transparent pixels outside the rounded widget remain transparent.
+The transparency control ranges from 0% to 80%; a higher value makes the glass more transparent. The current rendering intentionally avoids a native rectangular backdrop so transparent pixels outside the rounded widget remain transparent.
 
 ### Local activity analytics
 
@@ -186,9 +193,12 @@ docs/      Supporting design and verification documents
 - **Remote quota is unavailable:** verify the active executable, the auth-file lookup order above, and that `tokens.access_token` is present. A stale or expired token is not refreshed automatically.
 - **Local totals are empty or partial:** verify `%CODEX_HOME%`/`%USERPROFILE%\.codex`, the `sessions` and `archived_sessions` directories, and the cache/index status shown in Activity.
 - **The widget is on the wrong monitor:** use Reset widget position, unlock the position if needed, then drag the floating widget across the virtual desktop. Windows display scaling and monitor arrangement are handled per monitor.
-- **The widget looks too opaque or too transparent:** open the menu's Transparency setting; the supported range is 20–80%.
+- **The widget looks too opaque or too transparent:** open the menu's Transparency setting; the supported range is 0–80%.
 - **Fonts or the icon are missing:** confirm that `assets` is beside the executable.
 
 ## License
 
-No license file is currently included in this repository. Confirm the intended licensing terms before redistributing the application.
+Codex Usage Monitor is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Bundled third-party assets remain under their respective licenses.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.

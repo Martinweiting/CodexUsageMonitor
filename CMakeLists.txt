@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.21)
 
-project(CodexUsageMonitor VERSION 0.1.0 LANGUAGES CXX)
+project(CodexUsageMonitor VERSION 1.0.0 LANGUAGES CXX)
 
 option(CODEX_USAGE_MONITOR_BUILD_TESTS "Build native CodexUsageMonitor tests" OFF)
 option(CODEX_USAGE_MONITOR_UI_TEST_WINDOW "Expose the widget as an app window for UI automation" OFF)

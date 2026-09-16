@@ -155,8 +155,8 @@ int RectHeight(const RECT& rect) {
 
 int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
     (void)width;
-    // Spacious full-mode glass layout with summary, reset and detail cards.
-    return ScaleForDpi(hwnd, 650);
+    // Spacious full-mode glass layout with summary, points, reset and detail cards.
+    return ScaleForDpi(hwnd, 720);
 }
 
 int CalculateSimpleMinimumWidgetHeight(HWND hwnd) {
@@ -283,6 +283,23 @@ std::wstring FormatNumberNoUnit(double value) {
     wchar_t buffer[32] = {};
     swprintf_s(buffer, L"%.1f", value);
     return buffer;
+}
+
+std::wstring FormatCreditBalance(double value) {
+    if (!std::isfinite(value)) {
+        return L"--";
+    }
+
+    wchar_t buffer[64] = {};
+    swprintf_s(buffer, L"%.2f", value);
+    std::wstring formatted(buffer);
+    while (formatted.size() > 1 && formatted.back() == L'0') {
+        formatted.pop_back();
+    }
+    if (!formatted.empty() && formatted.back() == L'.') {
+        formatted.pop_back();
+    }
+    return formatted.empty() ? L"0" : formatted;
 }
 
 PaceInfo BuildPaceInfo(const UsageSnapshot& snapshot) {
@@ -2238,11 +2255,15 @@ void AppBarWindow::OnUsageUpdated() {
     refreshInFlight_ = false;
     lastRefreshCompletedUnixSeconds_ = static_cast<long long>(std::time(nullptr));
     lastRefreshSucceeded_ = false;
+    bool showLowQuotaWarning = false;
     if (result.has_value()) {
         snapshot_ = std::move(*result);
         lastRefreshSucceeded_ = snapshot_.success;
         if (snapshot_.success) {
             lastSuccessfulRefreshUnixSeconds_ = static_cast<long long>(std::time(nullptr));
+            const bool lowQuota = codex_widget::IsQuotaWarningThresholdReached(snapshot_);
+            showLowQuotaWarning = lowQuota && !lowQuotaWarningActive_;
+            lowQuotaWarningActive_ = lowQuota;
         }
     }
     // Credit-row count affects preferred height; keep geometry tight.
@@ -2251,6 +2272,46 @@ void AppBarWindow::OnUsageUpdated() {
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
     RenderLayeredSurface();
+    if (showLowQuotaWarning) {
+        ShowLowQuotaWarning(snapshot_);
+    }
+}
+
+void AppBarWindow::ShowLowQuotaWarning(const UsageSnapshot& snapshot) {
+    std::wstring affectedWindows;
+    const auto appendWindow = [&](const wchar_t* label, const UsageWindow& window) {
+        if (!window.available
+            || window.remainingPercent > codex_widget::kQuotaWarningRemainingPercent) {
+            return;
+        }
+        if (!affectedWindows.empty()) {
+            affectedWindows += L"\n";
+        }
+        affectedWindows += label;
+        affectedWindows += L": ";
+        affectedWindows += FormatPercent(window.remainingPercent);
+    };
+
+    appendWindow(LocalizeText(L"5-hour quota", L"5 小時配額"), snapshot.fiveHour);
+    appendWindow(LocalizeText(L"Weekly quota", L"每週配額"), snapshot.weekly);
+    if (affectedWindows.empty()) {
+        return;
+    }
+
+    std::wstring message = LocalizeText(
+        L"Quota remaining is critically low (2% or less).",
+        L"配額剩餘已進入危險範圍（2% 以下）。");
+    message += L"\n\n";
+    message += affectedWindows;
+    message += L"\n\n";
+    message += LocalizeText(
+        L"Please refresh or wait for the quota window to reset.",
+        L"請重新整理，或等待配額週期重置。");
+    MessageBoxW(
+        hwnd_,
+        message.c_str(),
+        LocalizeText(L"Codex quota warning", L"Codex 配額警告"),
+        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
 }
 
 void AppBarWindow::RequestLatestReleaseCheck(bool force) {
@@ -2739,6 +2800,25 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                     D2D1::Point2F(left + width * 0.08f, top + height * 0.82f),
                     D2D1::Point2F(left + width * 0.90f, top + height * 0.82f),
                     color, stroke, 0.96f);
+                break;
+            }
+            case 6: {  // remaining points
+                renderTarget_->DrawEllipse(
+                    D2D1::Ellipse(center, inner * 0.92f, inner * 0.92f),
+                    solidBrush_.Get(),
+                    stroke);
+                drawLine(
+                    D2D1::Point2F(left + width * 0.22f, center.y - inner * 0.36f),
+                    D2D1::Point2F(left + width * 0.78f, center.y - inner * 0.36f),
+                    color,
+                    stroke,
+                    0.96f);
+                drawLine(
+                    D2D1::Point2F(left + width * 0.22f, center.y + inner * 0.36f),
+                    D2D1::Point2F(left + width * 0.78f, center.y + inner * 0.36f),
+                    color,
+                    stroke,
+                    0.96f);
                 break;
             }
             default:
@@ -3462,6 +3542,39 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING);
         y = paceRect.bottom + cardGap;
+
+        const int pointsCardHeight = ScaleForDpi(hwnd_, 58);
+        const RECT pointsCard = MakeRect(
+            panelRect.left + fullPad,
+            y,
+            panelRect.right - fullPad,
+            y + pointsCardHeight);
+        fillCard(pointsCard, cardNeutral);
+        drawVectorIcon(
+            MakeRect(pointsCard.left + ScaleForDpi(hwnd_, 12), pointsCard.top + ScaleForDpi(hwnd_, 5),
+                pointsCard.left + ScaleForDpi(hwnd_, 40), pointsCard.top + ScaleForDpi(hwnd_, 33)),
+            6,
+            textPrimary);
+        drawOpaqueTextLine(
+            textFormatMetricLabel_.Get(),
+            LocalizeText(L"Remaining points", L"剩餘積分"),
+            MakeRect(pointsCard.left + ScaleForDpi(hwnd_, 48), pointsCard.top + ScaleForDpi(hwnd_, 7),
+                pointsCard.right - ScaleForDpi(hwnd_, 150), pointsCard.top + ScaleForDpi(hwnd_, 25)),
+            textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING);
+        const std::wstring pointsValue = snapshot_.credits.hasBalance
+            ? FormatCreditBalance(snapshot_.credits.balance)
+            : (snapshot_.credits.available
+                ? LocalizeText(L"Unavailable", L"目前無法取得")
+                : L"--");
+        drawOpaqueTextLine(
+            textFormatDelta_.Get(),
+            pointsValue,
+            MakeRect(pointsCard.right - ScaleForDpi(hwnd_, 142), pointsCard.top + ScaleForDpi(hwnd_, 5),
+                pointsCard.right - ScaleForDpi(hwnd_, 14), pointsCard.bottom - ScaleForDpi(hwnd_, 5)),
+            snapshot_.credits.hasBalance ? textPrimary : textSecondary,
+            DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y = pointsCard.bottom + cardGap;
 
         const int creditCount = snapshot_.resetCredits.fetched
             ? static_cast<int>(snapshot_.resetCredits.availableCredits.size())

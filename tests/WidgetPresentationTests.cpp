@@ -451,6 +451,21 @@ int main(int argc, char** argv) {
         codex_widget::LanguageKind::TraditionalChinese)) ==
         L"使用量限制重設 (Full reset Weekly + 5 hr)");
 
+    UsageSnapshot criticalFiveHour = snapshot;
+    criticalFiveHour.fiveHour.remainingPercent = codex_widget::kQuotaWarningRemainingPercent;
+    assert(codex_widget::IsQuotaWarningThresholdReached(criticalFiveHour));
+    criticalFiveHour.fiveHour.remainingPercent = codex_widget::kQuotaWarningRemainingPercent + 1;
+    assert(!codex_widget::IsQuotaWarningThresholdReached(criticalFiveHour));
+
+    UsageSnapshot criticalWeekly = snapshot;
+    criticalWeekly.fiveHour.available = false;
+    criticalWeekly.weekly.remainingPercent = 1;
+    assert(codex_widget::IsQuotaWarningThresholdReached(criticalWeekly));
+
+    UsageSnapshot failedQuota = criticalFiveHour;
+    failedQuota.success = false;
+    assert(!codex_widget::IsQuotaWarningThresholdReached(failedQuota));
+
     UsageSnapshot weeklyOnly;
     weeklyOnly.success = true;
     weeklyOnly.fiveHour.remainingPercent = 0;
@@ -542,6 +557,19 @@ int main(int argc, char** argv) {
     assert(enrichedPayload.credits.hasApproxCloudMessages);
     assert(enrichedPayload.spendControl.hasReached && !enrichedPayload.spendControl.reached);
     assert(enrichedPayload.hasApplicableResetCredits && enrichedPayload.applicableResetCredits == 2);
+
+    const UsageSnapshot stringBalancePayload = fetcher.ParseUsageJson(
+        R"({
+            "rate_limit":{
+                "primary_window":{"used_percent":1,"limit_window_seconds":18000}
+            },
+            "credits":{"balance":"1892.7956905000"}
+        })",
+        &parseError);
+    assert(stringBalancePayload.success);
+    assert(stringBalancePayload.credits.available);
+    assert(stringBalancePayload.credits.hasBalance);
+    assert(std::abs(stringBalancePayload.credits.balance - 1892.7956905) < 0.000000001);
 
     const UsageSnapshot nullOptionalPayload = fetcher.ParseUsageJson(
         R"({

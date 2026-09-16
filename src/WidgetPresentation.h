@@ -12,6 +12,7 @@ enum class FullPage { Quota, Activity };
 enum class LanguageKind { English, TraditionalChinese };
 enum class UsageStatus { Loading, Failed, Normal, Tight, Exhausted };
 
+constexpr int kQuotaWarningRemainingPercent = 2;
 constexpr int kTaskbarWidgetLogicalDiameter = 96;
 constexpr int kTaskbarWidgetLogicalWidth = kTaskbarWidgetLogicalDiameter;
 constexpr int kTaskbarWidgetLogicalHeight = kTaskbarWidgetLogicalDiameter;
@@ -71,6 +72,7 @@ WidgetRect CloseControlRect(const WidgetRect& surface, int inset, int controlSiz
 WidgetRect RefreshControlRect(const WidgetRect& surface, int inset, int controlSize);
 int FullModeHeightForCreditRows(int baseHeight, int creditRows, int rowHeight);
 UsageSummary BuildUsageSummary(const UsageSnapshot& snapshot);
+bool IsQuotaWarningThresholdReached(const UsageSnapshot& snapshot);
 const wchar_t* ResetInventoryTitle(LanguageKind language);
 
 }  // namespace codex_widget

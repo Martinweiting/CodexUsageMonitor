@@ -246,6 +246,18 @@ UsageSummary BuildUsageSummary(const UsageSnapshot& snapshot) {
     return summary;
 }
 
+bool IsQuotaWarningThresholdReached(const UsageSnapshot& snapshot) {
+    if (!snapshot.success) {
+        return false;
+    }
+
+    const auto isCritical = [](const UsageWindow& window) {
+        return window.available
+            && window.remainingPercent <= kQuotaWarningRemainingPercent;
+    };
+    return isCritical(snapshot.fiveHour) || isCritical(snapshot.weekly);
+}
+
 const wchar_t* ResetInventoryTitle(LanguageKind language) {
     return language == LanguageKind::TraditionalChinese
         ? L"使用量限制重設 (Full reset Weekly + 5 hr)"
